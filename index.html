@@ -186,6 +186,14 @@ function saveLocal(key, value) {
   }
 }
 
+// IDB: fotos ficam SOMENTE no IndexedDB
+function laudoSemFotos(l) {
+  var c = Object.assign({}, l);
+  c._hasPhotos = !!(l.photos && l.photos.length > 0);
+  c._photoCount = (l.photos && l.photos.length) || 0;
+  delete c.photos;
+  return c;
+}
 // IndexedDB para fotos dos laudos
 // IDB unificado: "meca_v3" com stores "fotos" (laudos) e "manuals_data"
 function openMecaIDB() {
@@ -276,10 +284,14 @@ function mergeRecordLists(localValue, remoteValue) {
 // Salvar laudo individual no Firebase (evita limite 10MB do array)
 async function saveLaudoFB(laudo) {
   if (!window.DB) return;
-  // Cada laudo vai em meca/laudos/{id} — máx ~400KB com 8 fotos comprimidas
+  var _fbMeta = laudoSemFotos(laudo);
   await window.DB.ref("meca/laudos/" + laudo.id).set(laudo);
 }
 
+async function deleteLaudoFB(id) {
+  if (!window.DB) return;
+  try { await window.DB.ref("meca/laudos/" + id).remove(); } catch(_e) {}
+}
 async function saveRemote(key, value) {
   if (isRecordList(value)) {
     if (key === "meca/laudos") {
@@ -2450,7 +2462,10 @@ function App() {
       if (!serviceList.length) await save(K.services,SEED);
       setQuotesRaw(listOrEmpty(qu));
       setScheduleRaw(listOrEmpty(sc));
-      setLaudosRaw(listOrEmpty(ld));
+      // Laudos: reintegrar fotos do IDB
+      const ldMeta = listOrEmpty(ldRaw);
+      const ld = await loadPhotosIDB(ldMeta);
+      setLaudosRaw(ld);
       setTecnicosRaw(listOrEmpty(tc));
       setManualsRaw(listOrEmpty(await loadManuals()));
       setUsersRaw(listOrEmpty(us));
@@ -2462,7 +2477,11 @@ function App() {
       subscribe(K.services,  v => { const list = listOrEmpty(v); setServicesRaw(list.length?list:SEED); }),
       subscribe(K.quotes,    v => setQuotesRaw(listOrEmpty(v))),
       subscribe(K.schedule,  v => setScheduleRaw(listOrEmpty(v))),
-      subscribe(K.laudos,    v => setLaudosRaw(listOrEmpty(v))),
+       subscribe(K.laudos, async function(v) {
+        var _lmeta = listOrEmpty(v);
+        var _lcf = await loadPhotosIDB(_lmeta);
+        setLaudosRaw(_lcf);
+      }),
       subscribe(K.tecnicos,  v => setTecnicosRaw(listOrEmpty(v))),
       subscribe(K.users, v => setUsersRaw(listOrEmpty(v))),
       subscribe(K.manuals, async v => {
