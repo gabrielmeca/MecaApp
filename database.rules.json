@@ -1,0 +1,32 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "acesso": {
+      ".read": "auth != null && root.child('acesso').child(auth.uid).child('active').val() === true && root.child('acesso').child(auth.uid).child('role').val() === 'master'",
+      ".write": "auth != null && root.child('acesso').child(auth.uid).child('active').val() === true && root.child('acesso').child(auth.uid).child('role').val() === 'master'",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
+      }
+    },
+    "meca": {
+      ".read": "auth != null && root.child('acesso').child(auth.uid).child('active').val() === true",
+      ".write": "auth != null && root.child('acesso').child(auth.uid).child('active').val() === true"
+    },
+    "entrada": {
+      ".read": "auth != null && root.child('acesso').child(auth.uid).child('active').val() === true",
+      "chamados": {
+        "$id": {
+          ".write": "(!data.exists() && newData.exists()) || auth != null && root.child('acesso').child(auth.uid).child('active').val() === true",
+          ".validate": "newData.hasChildren(['agend', 'cliente']) && newData.child('agend/id').val() === $id"
+        }
+      },
+      "prevChamados": {
+        "$id": {
+          ".write": "(!data.exists() && newData.exists()) || auth != null && root.child('acesso').child(auth.uid).child('active').val() === true",
+          ".validate": "newData.hasChildren(['id', 'cliente', 'whatsapp']) && newData.child('id').val() === $id && newData.child('cliente').isString() && newData.child('cliente').val().length <= 200"
+        }
+      }
+    }
+  }
+}

@@ -298,14 +298,8 @@ function enviarFirebase(){
     status: 'novo', origem: 'formulario'
   };
   try{
-    // Mesmo formato de lista que o MecaApp usa (array de registros com id)
-    fbDB.ref('meca/prevChamados').transaction(function(v){
-      var a = [];
-      if(v){ for(var k in v){ if(v[k] && v[k].id) a.push(v[k]); } }
-      for(var i=0;i<a.length;i++){ if(a[i].id===reg.id) return a; }
-      a.unshift(reg);
-      return a;
-    });
+    // O formulário público só pode criar o chamado na caixa de entrada; o MecaApp (com login) o move para Preventivas.
+    fbDB.ref('entrada/prevChamados/'+reg.id).set(reg).catch(function(){});
   }catch(e){}
 }
 

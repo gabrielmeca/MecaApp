@@ -15,17 +15,24 @@
       function loadFB(src, cb) {
         var s = document.createElement('script');
         s.src = src; s.onload = cb;
-        s.onerror = function() { console.warn('Firebase CDN falhou'); };
+        s.onerror = function() { console.warn('Firebase CDN falhou'); window.dispatchEvent(new Event('firebase-failed')); };
         document.head.appendChild(s);
       }
       loadFB('https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js', function() {
         loadFB('https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js', function() {
-          try {
-            firebase.initializeApp(window.FIREBASE_CONFIG);
-            window.DB = firebase.database();
-            console.log('\u2713 Firebase conectado');
-            window.dispatchEvent(new Event('firebase-ready'));
-          } catch(e) { console.warn('Firebase erro:', e.message); }
+          loadFB('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js', function() {
+            function iniciar() {
+              try {
+                firebase.initializeApp(window.FIREBASE_CONFIG);
+                window.DB = firebase.database();
+                window.AUTH = firebase.auth();
+                console.log('\u2713 Firebase conectado');
+                window.dispatchEvent(new Event('firebase-ready'));
+              } catch(e) { console.warn('Firebase erro:', e.message); window.dispatchEvent(new Event('firebase-failed')); }
+            }
+            // FIREBASE_CONFIG é definido mais abaixo no <head>; com cache o SDK pode chegar antes
+            if (window.FIREBASE_CONFIG) iniciar(); else document.addEventListener('DOMContentLoaded', iniciar);
+          });
         });
       });
     })();
@@ -443,7 +450,13 @@ function subscribe(key, callback) {
 // ═══════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
-const DEFAULT_PW = "Meca@1010";
+// Login do app = conta do Firebase Authentication. "joao" vira joao@usuarios.mecaapp.com.br
+// (o e-mail é só um identificador; nenhum e-mail é enviado).
+const LOGIN_DOMINIO = "usuarios.mecaapp.com.br";
+function loginParaEmail(l) {
+  l = String(l || "").trim().toLowerCase();
+  return l.includes("@") ? l : l.replace(/[^a-z0-9._-]/g, "") + "@" + LOGIN_DOMINIO;
+}
 // Sessão de login: sobrevive ao atualizar a página, some ao fechar a aba
 const SESSION_KEY = "meca/session";
 function loadSession() {
@@ -2294,12 +2307,39 @@ const ALL_TABS_CONFIG = [
   {id:"preventivas", label:"Preventivas"},
 ];
 
-const DEFAULT_USER = {id:"",name:"",login:"",password:"",tabs:["laudo","clientes","manuais"],active:true,notes:""};
+// Usuários: contas do Firebase Authentication + permissões em acesso/{uid}
+// (as regras do banco só liberam meca/* para quem tem acesso/{uid}/active = true)
+const DEFAULT_USER = {uid:"",name:"",login:"",senha:"",role:"user",tabs:["laudo","clientes","manuais"],active:true,notes:""};
 
-function UserModal({initial, onSave, onClose}) {
-  const [f, setF] = useState(initial ? {...initial} : {...DEFAULT_USER});
+// Cria a conta numa instância separada do Firebase, para não trocar o usuário logado
+async function criarConta(login, senha) {
+  const sec = firebase.apps.find(a => a.name === "cadastro") || firebase.initializeApp(window.FIREBASE_CONFIG, "cadastro");
+  try {
+    const cred = await sec.auth().createUserWithEmailAndPassword(loginParaEmail(login), senha);
+    return cred.user.uid;
+  } finally {
+    try { await sec.auth().signOut(); } catch(_e) {}
+  }
+}
+function erroAuth(e) {
+  const c = (e && e.code) || "";
+  if (c === "auth/email-already-in-use") return "Este login já existe.";
+  if (c === "auth/weak-password") return "A senha precisa ter pelo menos 6 caracteres.";
+  if (c === "auth/invalid-email") return "Login inválido. Use letras, números, ponto ou traço.";
+  if (c === "auth/wrong-password" || c === "auth/user-not-found" || c === "auth/invalid-credential" || c === "auth/invalid-login-credentials") return "Login ou senha incorretos.";
+  if (c === "auth/too-many-requests") return "Muitas tentativas. Aguarde alguns minutos.";
+  if (c === "auth/network-request-failed") return "Sem conexão com a internet.";
+  return (e && e.message) || "Erro inesperado.";
+}
+
+function UserModal({initial, self, onSave, onClose}) {
+  const [f, setF] = useState(initial ? {...DEFAULT_USER, ...initial, senha:""} : {...DEFAULT_USER});
   const s = k => e => setF(p => ({...p, [k]: e.target.value}));
   const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const novo = !f.uid;
+  const proprio = self && f.uid === self;
 
   const toggleTab = tabId => {
     setF(p => ({
@@ -2308,26 +2348,41 @@ function UserModal({initial, onSave, onClose}) {
     }));
   };
 
-  return <Modal title={f.id ? "Editar Usuário" : "Novo Usuário"} onClose={onClose} maxWidth={520}>
+  const salvar = async () => {
+    if (!f.name.trim() || !f.login.trim() || (novo && !f.senha)) { setErr("Preencha nome, login e senha."); return; }
+    if (novo && f.senha.length < 6) { setErr("A senha precisa ter pelo menos 6 caracteres."); return; }
+    setBusy(true); setErr("");
+    try { await onSave(f); } catch(e) { setErr(erroAuth(e)); setBusy(false); }
+  };
+
+  return <Modal title={novo ? "Novo Usuário" : "Editar Usuário"} onClose={onClose} maxWidth={520}>
+    {err&&<Alert msg={{text:err,type:"error"}}/>}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
       <div style={{...fld,gridColumn:"1/-1"}}><label style={lbl}>Nome completo *</label>
         <input style={inp} value={f.name} onChange={s("name")} placeholder="Ex: João Silva"/></div>
       <div style={fld}><label style={lbl}>Login (usuário) *</label>
-        <input style={inp} value={f.login} onChange={s("login")} placeholder="Ex: joao"/></div>
-      <div style={fld}><label style={lbl}>Senha *</label>
-        <div style={{position:"relative"}}>
-          <input type={show?"text":"password"} style={{...inp,paddingRight:38}} value={f.password} onChange={s("password")} placeholder="Mínimo 4 chars"/>
-          <button onClick={()=>setShow(v=>!v)} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:C.muted}}>
-            <Icon d={IC.eye} size={14}/>
-          </button>
-        </div>
-      </div>
+        <input style={inp} value={f.login} onChange={s("login")} placeholder="Ex: joao" disabled={!novo}/></div>
+      {novo
+        ? <div style={fld}><label style={lbl}>Senha *</label>
+            <div style={{position:"relative"}}>
+              <input type={show?"text":"password"} style={{...inp,paddingRight:38}} value={f.senha} onChange={s("senha")} placeholder="Mínimo 6 caracteres"/>
+              <button onClick={()=>setShow(v=>!v)} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:C.muted}}>
+                <Icon d={IC.eye} size={14}/>
+              </button>
+            </div>
+          </div>
+        : <div style={{...fld,justifyContent:"flex-end"}}><div style={{fontSize:11,color:C.muted,lineHeight:1.4}}>A senha só pode ser trocada pelo próprio usuário (Alterar Senha).</div></div>}
       <div style={fld}><label style={lbl}>Status</label>
-        <select style={inp} value={f.active?"ativo":"inativo"} onChange={e=>setF(p=>({...p,active:e.target.value==="ativo"}))}>
-          <option value="ativo">Ativo</option><option value="inativo">Inativo</option>
+        <select style={inp} value={f.active?"ativo":"inativo"} disabled={proprio} onChange={e=>setF(p=>({...p,active:e.target.value==="ativo"}))}>
+          <option value="ativo">Ativo</option><option value="inativo">Inativo (sem acesso)</option>
         </select>
       </div>
-      <div style={{...fld,gridColumn:"1/-1",marginTop:4}}>
+      <div style={fld}><label style={lbl}>Perfil</label>
+        <select style={inp} value={f.role} disabled={proprio} onChange={s("role")}>
+          <option value="user">Usuário (abas escolhidas)</option><option value="master">Master (acesso total)</option>
+        </select>
+      </div>
+      {f.role!=="master"&&<div style={{...fld,gridColumn:"1/-1",marginTop:4}}>
         <label style={{...lbl,marginBottom:10}}>Abas que este usuário pode acessar</label>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
           {ALL_TABS_CONFIG.map(t => {
@@ -2345,47 +2400,107 @@ function UserModal({initial, onSave, onClose}) {
             </button>;
           })}
         </div>
-      </div>
+      </div>}
       <div style={{...fld,gridColumn:"1/-1"}}><label style={lbl}>Observações</label>
         <textarea style={{...inp,resize:"vertical",minHeight:48}} value={f.notes} onChange={s("notes")}/></div>
     </div>
     <div style={{...row,justifyContent:"flex-end",marginTop:18,gap:10}}>
       <button style={btn("ghost")} onClick={onClose}>Cancelar</button>
-      <button style={btn("primary")} onClick={()=>{
-        if(!f.name.trim()||!f.login.trim()||!f.password){
-          alert("Preencha nome, login e senha."); return;
-        }
-        onSave({...f, id:f.id||uid()});
-      }}><Icon d={IC.save} size={15}/>Salvar</button>
+      <button style={{...btn("primary"),opacity:busy?0.6:1}} disabled={busy} onClick={salvar}><Icon d={IC.save} size={15}/>{busy?"Salvando…":"Salvar"}</button>
     </div>
   </Modal>;
 }
 
-function TabUsuarios({data, onSave, onDelete}) {
+function TabUsuarios({currentUser}) {
+  const [data, setData] = useState([]);
+  const [antigos, setAntigos] = useState([]);
   const [modal, setModal] = useState(null);
   const [msg, setMsg] = useState(null);
-  const flash = (t,tp="success")=>{setMsg({text:t,type:tp});setTimeout(()=>setMsg(null),3000);};
+  const [migrando, setMigrando] = useState(false);
+  const flash = (t,tp="success")=>{setMsg({text:t,type:tp});setTimeout(()=>setMsg(null),4000);};
+
+  useEffect(() => {
+    if (!window.DB) return;
+    const ref = window.DB.ref("acesso");
+    const h = snap => {
+      const v = snap.val() || {};
+      setData(Object.keys(v).map(uid => ({...DEFAULT_USER, ...v[uid], uid})).sort((a,b)=>(a.name||"").localeCompare(b.name||"")));
+    };
+    ref.on("value", h, () => setData([]));
+    // Usuários do sistema antigo (senha gravada no banco), para migrar
+    const refA = window.DB.ref(K.users);
+    const hA = snap => setAntigos(userList(snap.val()));
+    refA.on("value", hA, () => setAntigos([]));
+    return () => { ref.off("value", h); refA.off("value", hA); };
+  }, []);
+
+  const gravar = (uid, f) => window.DB.ref("acesso/"+uid).set({
+    name:f.name.trim(), login:f.login.trim().toLowerCase(), role:f.role==="master"?"master":"user",
+    tabs:f.tabs||[], active:!!f.active, notes:f.notes||"", atualizadoEm:new Date().toISOString()
+  });
+
+  const salvar = async f => {
+    if (f.uid) { await gravar(f.uid, f); setModal(null); flash("Usuário salvo!"); return; }
+    const uid = await criarConta(f.login, f.senha);
+    await gravar(uid, f);
+    setModal(null); flash("Usuário criado! Login: "+f.login.trim().toLowerCase());
+  };
+
+  const remover = async u => {
+    if (u.uid === currentUser.uid) { alert("Você não pode remover o seu próprio acesso."); return; }
+    if (!window.confirm("Remover o acesso de "+u.name+"? Ele não conseguirá mais entrar no app.")) return;
+    await window.DB.ref("acesso/"+u.uid).remove();
+    flash("Acesso removido.","error");
+  };
+
+  const migrar = async () => {
+    if (!window.confirm("Criar contas seguras para os "+antigos.length+" usuário(s) antigo(s), com o mesmo login e senha, e apagar as senhas gravadas no banco?")) return;
+    setMigrando(true);
+    const falhas = [];
+    for (const u of antigos) {
+      try {
+        if (!u.password || u.password.length < 6) throw {code:"auth/weak-password"};
+        const uid = await criarConta(u.login, u.password);
+        await gravar(uid, {name:u.name||u.login, login:u.login, role:"user", tabs:u.tabs||[], active:u.active!==false, notes:u.notes||""});
+      } catch(e) {
+        falhas.push(u.login+": "+erroAuth(e));
+      }
+    }
+    const restantes = antigos.filter(u => falhas.some(x => x.startsWith(u.login+":")));
+    await window.DB.ref(K.users).set(restantes.length ? restantes : null);
+    await window.DB.ref(K.password).remove();
+    try { localStorage.removeItem(localKey(K.users)); localStorage.removeItem(localKey(K.password)); } catch(_e) {}
+    setMigrando(false);
+    if (falhas.length) flash("Migrado, exceto: "+falhas.join(" · ")+". Crie esses manualmente.","error");
+    else flash("Usuários migrados. As senhas antigas foram apagadas do banco.");
+  };
 
   return <div><Alert msg={msg}/>
     <div style={{...card,background:"rgba(232,103,10,0.08)",border:"1px solid rgba(232,103,10,0.3)",marginBottom:16}}>
       <div style={{...row,gap:10}}>
         <Icon d={IC.shield} size={16}/>
         <div>
-          <div style={{fontWeight:700,fontSize:13,color:C.orange}}>Senha Master</div>
-          <div style={{fontSize:12,color:C.muted,marginTop:2}}>A senha master (Meca@1010) sempre tem acesso total a tudo. Os usuários abaixo têm acesso restrito às abas selecionadas.</div>
+          <div style={{fontWeight:700,fontSize:13,color:C.orange}}>Acesso protegido</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Cada pessoa entra com o próprio login e senha. Usuários Master veem tudo e gerenciam esta lista; os demais veem só as abas marcadas. Quem está inativo ou fora da lista não consegue ler nem gravar nada no banco.</div>
         </div>
       </div>
     </div>
 
+    {antigos.length>0&&<div style={{...card,border:"1px solid #f39c12",background:"rgba(243,156,18,0.08)",marginBottom:16}}>
+      <div style={{fontWeight:700,fontSize:13,color:"#f39c12",marginBottom:6}}>{antigos.length} usuário(s) do sistema antigo</div>
+      <div style={{fontSize:12,color:C.muted,marginBottom:10}}>Eles ainda têm a senha gravada no banco e não conseguem entrar no novo login: {antigos.map(u=>u.login).join(", ")}. Clique para criar as contas com o mesmo login e senha (a senha precisa ter 6+ caracteres) e apagar as senhas antigas.</div>
+      <button style={{...btn("primary"),opacity:migrando?0.6:1}} disabled={migrando} onClick={migrar}>{migrando?"Migrando…":"Migrar usuários antigos"}</button>
+    </div>}
+
     <div style={{...row,justifyContent:"space-between",marginBottom:14}}>
-      <div style={{fontSize:13,color:C.muted}}>{data.length} usuário(s) cadastrado(s)</div>
+      <div style={{fontSize:13,color:C.muted}}>{data.length} usuário(s) com acesso</div>
       <button style={btn("primary")} onClick={()=>setModal("new")}><Icon d={IC.plus} size={15}/>Novo Usuário</button>
     </div>
 
     {data.length===0
-      ? <div style={{...card,textAlign:"center",padding:48,color:"#3a5880"}}>Nenhum usuário cadastrado. Crie usuários para controlar o acesso à cada aba.</div>
+      ? <div style={{...card,textAlign:"center",padding:48,color:"#3a5880"}}>Nenhum usuário.</div>
       : <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          {data.map(u => <div key={u.id} style={{background:C.navyM,border:"1px solid "+C.border,borderRadius:12,padding:"14px 18px",borderLeft:"4px solid "+(u.active?"#27ae60":"#e74c3c")}}>
+          {data.map(u => <div key={u.uid} style={{background:C.navyM,border:"1px solid "+C.border,borderRadius:12,padding:"14px 18px",borderLeft:"4px solid "+(u.active?"#27ae60":"#e74c3c")}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
               <div>
                 <div style={{...row,marginBottom:6,flexWrap:"wrap"}}>
@@ -2393,13 +2508,14 @@ function TabUsuarios({data, onSave, onDelete}) {
                     {(u.name||"?")[0].toUpperCase()}
                   </div>
                   <div>
-                    <div style={{fontWeight:800,fontSize:14}}>{u.name}</div>
+                    <div style={{fontWeight:800,fontSize:14}}>{u.name}{u.uid===currentUser.uid&&<span style={{color:C.muted,fontWeight:600,fontSize:12}}> (você)</span>}</div>
                     <div style={{fontSize:12,color:C.blueL}}>@{u.login}
                       <span style={{marginLeft:8,background:u.active?"rgba(39,174,96,0.15)":"rgba(231,76,60,0.15)",color:u.active?"#27ae60":"#e74c3c",borderRadius:20,padding:"1px 8px",fontSize:11,fontWeight:700}}>{u.active?"Ativo":"Inativo"}</span>
+                      {u.role==="master"&&<span style={{marginLeft:6,background:"rgba(232,103,10,0.15)",color:C.orange,borderRadius:20,padding:"1px 8px",fontSize:11,fontWeight:700}}>Master</span>}
                     </div>
                   </div>
                 </div>
-                <div style={{marginTop:6}}>
+                {u.role!=="master"&&<div style={{marginTop:6}}>
                   <div style={{fontSize:11,color:C.muted,marginBottom:4,textTransform:"uppercase",letterSpacing:1}}>Abas com acesso:</div>
                   <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
                     {ALL_TABS_CONFIG.map(t => {
@@ -2412,18 +2528,18 @@ function TabUsuarios({data, onSave, onDelete}) {
                       }}>{t.label}</span>;
                     })}
                   </div>
-                </div>
+                </div>}
                 {u.notes&&<div style={{fontSize:12,color:C.muted,marginTop:6,fontStyle:"italic"}}>{u.notes}</div>}
               </div>
               <div style={row}>
                 <button style={btn("ghost")} onClick={()=>setModal(u)}><Icon d={IC.edit} size={14}/></button>
-                <button style={btn("danger")} onClick={()=>{if(window.confirm("Excluir usuário "+u.name+"?"))onDelete(u.id);flash("Excluído.","error");}}><Icon d={IC.trash} size={14}/></button>
+                {u.uid!==currentUser.uid&&<button style={btn("danger")} onClick={()=>remover(u)}><Icon d={IC.trash} size={14}/></button>}
               </div>
             </div>
           </div>)}
         </div>}
 
-    {modal!==null&&<UserModal initial={modal==="new"?null:modal} onSave={u=>{onSave(u);setModal(null);flash("Usuário salvo!");}} onClose={()=>setModal(null)}/>}
+    {modal!==null&&<UserModal initial={modal==="new"?null:modal} self={currentUser.uid} onSave={salvar} onClose={()=>setModal(null)}/>}
   </div>;
 }
 
@@ -2765,36 +2881,31 @@ function TabControle({laudos, quotes, schedule}) {
 // ═══════════════════════════════════════════════════════════════
 // AUTH
 // ═══════════════════════════════════════════════════════════════
-function LoginOverlay({onLogin, onCancel}) {
+function LoginOverlay() {
   const [loginField, setLoginField] = useState("");
   const [pw, setPw] = useState("");
   const [show, setShow] = useState(false);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
   const tryLogin = async () => {
-    // 1. Verifica senha master
-    const stored = await load(K.password, DEFAULT_PW);
-    if (pw === stored) { onLogin({role:"master",name:"Master"}); return; }
-    // 2. Verifica usuários cadastrados (por login+senha ou só senha)
-    const allUsers = userList(await load(K.users, []));
-    // Tenta match por: campo login como usuário, ou só senha
-    const matched = allUsers.find(u => u.active && (
-      (loginField && u.login === loginField && u.password === pw) ||
-      (!loginField && u.password === pw)
-    ));
-    if (matched) { onLogin({role:"user", name:matched.name, login:matched.login, tabs:matched.tabs||[]}); return; }
-    setErr("Login ou senha incorretos."); setPw("");
+    if (!loginField.trim() || !pw) { setErr("Informe login e senha."); return; }
+    setBusy(true); setErr("");
+    try {
+      await window.AUTH.signInWithEmailAndPassword(loginParaEmail(loginField), pw);
+    } catch(e) {
+      setErr(erroAuth(e)); setPw(""); setBusy(false);
+    }
   };
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:3000,fontFamily:"'Barlow',sans-serif"}}>
-      <div style={{background:C.navyM,border:"1px solid "+C.border,borderRadius:16,padding:"40px 44px",width:"100%",maxWidth:380,textAlign:"center",position:"relative"}}>
-        {onCancel&&<button onClick={onCancel} style={{position:"absolute",top:14,right:14,background:"none",border:"none",cursor:"pointer",color:C.muted}}><Icon d={IC.x} size={18}/></button>}
+    <div style={{position:"fixed",inset:0,background:C.navy,display:"flex",alignItems:"center",justifyContent:"center",zIndex:3000,fontFamily:"'Barlow',sans-serif",padding:16}}>
+      <div style={{background:C.navyM,border:"1px solid "+C.border,borderRadius:16,padding:"40px 32px",width:"100%",maxWidth:380,textAlign:"center",position:"relative"}}>
         <img src={LOGO} alt="Meca" style={{width:76,height:76,objectFit:"cover",borderRadius:12,marginBottom:18}}/>
         <div style={{fontSize:26,fontWeight:900,color:C.orange,letterSpacing:-1,marginBottom:4}}>meca</div>
         <div style={{fontSize:11,color:C.blueL,letterSpacing:3,textTransform:"uppercase",marginBottom:26}}>Laundry Solutions</div>
-        <div style={{fontSize:13,color:C.muted,marginBottom:18}}>Digite a senha master para acessar</div>
+        <div style={{fontSize:13,color:C.muted,marginBottom:18}}>Entre com seu login e senha</div>
         {err&&<div style={{padding:"8px 14px",borderRadius:7,fontSize:13,fontWeight:600,marginBottom:14,background:"rgba(192,57,43,0.15)",color:"#e74c3c"}}>{err}</div>}
         <div style={{marginBottom:10}}>
-          <input type="text" placeholder="Login (deixe em branco para master)" value={loginField}
+          <input type="text" placeholder="Login" value={loginField} autoCapitalize="none" autoCorrect="off"
             onChange={e=>{setLoginField(e.target.value);setErr("");}}
             onKeyDown={e=>e.key==="Enter"&&tryLogin()}
             style={{...inp,fontSize:14}} autoFocus/>
@@ -2806,7 +2917,7 @@ function LoginOverlay({onLogin, onCancel}) {
             style={{...inp,paddingRight:44,fontSize:15,letterSpacing:2}}/>
           <button onClick={()=>setShow(s=>!s)} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:C.muted}}><Icon d={IC.eye} size={16}/></button>
         </div>
-        <button style={{...btn("primary"),width:"100%",justifyContent:"center",padding:"12px",fontSize:15}} onClick={tryLogin}><Icon d={IC.lock} size={16}/>Entrar</button>
+        <button style={{...btn("primary"),width:"100%",justifyContent:"center",padding:"12px",fontSize:15,opacity:busy?0.6:1}} disabled={busy} onClick={tryLogin}><Icon d={IC.lock} size={16}/>{busy?"Entrando…":"Entrar"}</button>
       </div>
     </div>
   );
@@ -2816,13 +2927,19 @@ function ChangePwModal({onClose}) {
   const [cur, setCur] = useState(""); const [nw, setNw] = useState(""); const [conf, setConf] = useState("");
   const [err, setErr] = useState(""); const [ok, setOk] = useState(false);
   const doSave = async () => {
-    const stored = await load(K.password, DEFAULT_PW);
-    if (cur!==stored){setErr("Senha atual incorreta.");return;}
     if (nw.length<6){setErr("Mínimo 6 caracteres.");return;}
     if (nw!==conf){setErr("Senhas não coincidem.");return;}
-    await save(K.password, nw); setOk(true); setTimeout(onClose, 1500);
+    try {
+      const u = window.AUTH.currentUser;
+      await u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email, cur));
+      await u.updatePassword(nw);
+      setOk(true); setTimeout(onClose, 1500);
+    } catch(e) {
+      const c = (e && e.code) || "";
+      setErr(c==="auth/wrong-password"||c==="auth/invalid-credential"||c==="auth/invalid-login-credentials" ? "Senha atual incorreta." : erroAuth(e));
+    }
   };
-  return <Modal title="Alterar Senha" onClose={onClose} maxWidth={400}>
+  return <Modal title="Alterar Minha Senha" onClose={onClose} maxWidth={400}>
     {ok?<div style={{textAlign:"center",padding:"20px 0",color:"#2ecc71",fontWeight:700}}>✓ Senha alterada!</div>
       :<div style={{display:"flex",flexDirection:"column",gap:14}}>
         {err&&<div style={{padding:"8px 14px",borderRadius:7,fontSize:13,fontWeight:600,background:"rgba(192,57,43,0.15)",color:"#e74c3c"}}>{err}</div>}
@@ -2837,14 +2954,80 @@ function ChangePwModal({onClose}) {
   </Modal>;
 }
 
+// Portão de entrada: nada do app carrega antes do login e da checagem em acesso/{uid}
+function Portao() {
+  const [fase, setFase] = useState("carregando"); // carregando | login | sem-acesso | erro | ok
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    let offAuth = null, offAcesso = null, timer = null;
+    const iniciar = () => {
+      if (!window.AUTH || offAuth) return;
+      clearTimeout(timer);
+      offAuth = window.AUTH.onAuthStateChanged(u => {
+        if (offAcesso) { offAcesso(); offAcesso = null; }
+        if (!u) { setUser(null); setFase("login"); return; }
+        setFase("carregando");
+        const ref = window.DB.ref("acesso/" + u.uid);
+        const h = snap => {
+          const a = snap.val();
+          if (!a || a.active !== true) { setUser({uid:u.uid, email:u.email}); setFase("sem-acesso"); return; }
+          setUser({uid:u.uid, email:u.email, login:a.login, name:a.name||a.login,
+            role:a.role==="master"?"master":"user", tabs:a.tabs||[]});
+          setFase("ok");
+        };
+        ref.on("value", h, () => { setUser({uid:u.uid, email:u.email}); setFase("sem-acesso"); });
+        offAcesso = () => ref.off("value", h);
+      });
+    };
+    const falhou = () => setFase("erro");
+    if (window.AUTH) iniciar();
+    else {
+      window.addEventListener("firebase-ready", iniciar);
+      window.addEventListener("firebase-failed", falhou);
+      timer = setTimeout(() => { if (!window.AUTH) setFase("erro"); }, 20000);
+    }
+    return () => {
+      offAuth && offAuth(); offAcesso && offAcesso(); clearTimeout(timer);
+      window.removeEventListener("firebase-ready", iniciar);
+      window.removeEventListener("firebase-failed", falhou);
+    };
+  }, []);
+
+  const sair = async () => {
+    // Não deixa cópia dos dados no aparelho depois de sair (a não ser que haja algo ainda não enviado)
+    try {
+      if (!getPendingKeys().length) Object.keys(localStorage).filter(k => k.startsWith("meca_local_")).forEach(k => localStorage.removeItem(k));
+      sessionStorage.removeItem("meca/tab");
+    } catch(_e) {}
+    await window.AUTH.signOut();
+  };
+
+  const tela = (conteudo) => <div style={{minHeight:"100vh",background:C.navy,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'Barlow',sans-serif",padding:24,color:C.text,textAlign:"center"}}>
+    <img src={LOGO} alt="Meca" style={{width:76,height:76,objectFit:"cover",borderRadius:12}}/>{conteudo}</div>;
+
+  if (fase === "login") return <LoginOverlay/>;
+  if (fase === "ok" && user) return <App key={user.uid} currentUser={user} onSair={sair}/>;
+  if (fase === "sem-acesso") return tela(<>
+    <div style={{color:C.orange,fontWeight:800,fontSize:17}}>Sem acesso ao app</div>
+    <div style={{fontSize:13,color:C.muted,maxWidth:380,lineHeight:1.6}}>Seu login está correto, mas ainda não foi liberado ou foi desativado. Peça a um usuário Master para liberar o seu acesso na aba Usuários.</div>
+    <div style={{fontSize:11,color:"#3a5880",fontFamily:"monospace"}}>ID: {user&&user.uid}</div>
+    <button style={btn("ghost")} onClick={sair}><Icon d={IC.lock} size={13}/>Sair</button>
+  </>);
+  if (fase === "erro") return tela(<>
+    <div style={{color:C.orange,fontWeight:800,fontSize:17}}>Sem conexão com o servidor</div>
+    <div style={{fontSize:13,color:C.muted,maxWidth:380,lineHeight:1.6}}>Não foi possível conectar ao Firebase. Verifique a internet e recarregue a página.</div>
+    <button style={btn("primary")} onClick={()=>location.reload()}>Recarregar</button>
+  </>);
+  return tela(<div style={{color:C.orange,fontWeight:700,fontSize:16}}>Carregando…</div>);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ROOT APP
 // ═══════════════════════════════════════════════════════════════
-function App() {
-  const [currentUser, setCurrentUser] = useState(loadSession);
-  const [authed, setAuthed]   = useState(() => !!loadSession());
-  const [showLogin, setLogin] = useState(false);
-  const [pendingTab, setPendingTab] = useState(null);
+function App({currentUser, onSair}) {
+  const authed = true;
+  const setLogin = () => {};
   const [changePw, setChangePw] = useState(false);
   const [tab, setTab]         = useState(() => { try { return sessionStorage.getItem("meca/tab") || "laudo"; } catch(_e) { return "laudo"; } });
   const [loading, setLoading] = useState(true);
@@ -2926,12 +3109,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // Usuários/senha do sistema antigo não são mais sincronizados por aqui
+    unmarkPending(K.users); unmarkPending(K.password);
     (async () => {
       const [cl,sv,qu,sc,ld,tc,us,mn,pc,pch] = await Promise.all([
         load(K.clients,[]),  load(K.services,null),
         load(K.quotes,[]),   load(K.schedule,[]),
         load(K.laudos,[]),   load(K.tecnicos,[]),
-        load(K.users,[]),
+        Promise.resolve([]),
         loadManuals(),
         load(K.prevContratos,[]), load(K.prevChamados,[]),
       ]);
@@ -2960,7 +3145,6 @@ function App() {
         setLaudosRaw(listOrEmpty(v));
       }),
       subscribe(K.tecnicos,  v => setTecnicosRaw(listOrEmpty(v))),
-      subscribe(K.users, v => setUsersRaw(userList(v))),
       subscribe(K.prevContratos, v => setPrevContratosRaw(listOrEmpty(v))),
       subscribe(K.prevChamados,  v => setPrevChamadosRaw(listOrEmpty(v))),
       subscribe(K.manuals, async v => {
@@ -2976,6 +3160,40 @@ function App() {
     }
     return () => unsubs.forEach(u=>u());
   }, []);
+
+  // Caixa de entrada pública: os formulários (chamado.html e meca-contratacao.html)
+  // só podem criar itens em entrada/*. Aqui eles entram nas listas do app e saem da caixa.
+  const latest = useRef({});
+  latest.current = {clients, schedule, prevChamados};
+  useEffect(() => {
+    if (loading || !window.DB) return;
+    const ref = window.DB.ref("entrada");
+    const h = async snap => {
+      const v = snap.val() || {};
+      const ch = v.chamados || {}, pv = v.prevChamados || {};
+      if (!Object.keys(ch).length && !Object.keys(pv).length) return;
+      let {clients:cl, schedule:sc, prevChamados:pc} = latest.current;
+      let mc = false, ms = false, mp = false;
+      Object.values(ch).forEach(it => {
+        if (!it) return;
+        if (it.agend && it.agend.id && !sc.find(a => a.id === it.agend.id)) { sc = [it.agend, ...sc]; ms = true; }
+        const c = it.cliente;
+        if (c && c.id && !cl.find(x => x.id === c.id || (x.name === c.name && String(x.phone||"").replace(/\D/g,"") === String(c.phone||"").replace(/\D/g,"")))) { cl = [c, ...cl]; mc = true; }
+      });
+      Object.values(pv).forEach(it => { if (it && it.id && !pc.find(x => x.id === it.id)) { pc = [it, ...pc]; mp = true; } });
+      const feitos = [];
+      if (ms) { setScheduleRaw(sc); feitos.push(save(K.schedule, sc).then(() => K.schedule)); }
+      if (mc) { setClientsRaw(cl); feitos.push(save(K.clients, cl).then(() => K.clients)); }
+      if (mp) { setPrevChamadosRaw(pc); feitos.push(save(K.prevChamados, pc).then(() => K.prevChamados)); }
+      await Promise.all(feitos);
+      // Só tira da caixa depois que a lista correspondente foi gravada no banco
+      const pend = getPendingKeys();
+      if (!pend.includes(K.schedule) && !pend.includes(K.clients)) Object.keys(ch).forEach(k => ref.child("chamados/" + k).remove().catch(()=>{}));
+      if (!pend.includes(K.prevChamados)) Object.keys(pv).forEach(k => ref.child("prevChamados/" + k).remove().catch(()=>{}));
+    };
+    ref.on("value", h, () => {});
+    return () => ref.off("value", h);
+  }, [loading]);
 
   function upsert(list, setList, item) {
     const safeList = listOrEmpty(list);
@@ -3037,10 +3255,7 @@ function App() {
   }
 
   async function removeClientWithPassword(id) {
-    const password = window.prompt("Digite a senha master para excluir este cliente:");
-    if (password === null) return false;
-    const stored = await load(K.password, DEFAULT_PW);
-    if (password !== stored) { window.alert("Senha incorreta. Cliente não excluído."); return false; }
+    if (!isMaster) { window.alert("Somente usuários Master podem excluir clientes."); return false; }
     remove(clients, setClients, id);
     return true;
   }
@@ -3055,7 +3270,7 @@ function App() {
     {id:"clientes",   label:`Clientes (${clients.length})`, icon:IC.users,    free:true},
     {id:"manuais",    label:`Manuais (${manuals.length})`,  icon:IC.folder,   free:true},
     {id:"tecnicos",   label:`Técnicos (${tecnicos.length})`,icon:IC.user,     free:false},
-    {id:"usuarios",   label:`Usuários (${users.length})`,   icon:IC.shield,   free:false},
+    {id:"usuarios",   label:"Usuários",                     icon:IC.shield,   free:false},
     {id:"preventivas",label:"Preventivas"+(prevChamados.filter(c=>pvChStatus(c)==="novo").length?" ("+prevChamados.filter(c=>pvChStatus(c)==="novo").length+" novos)":""),icon:IC.check,free:false},
   ];
 
@@ -3069,25 +3284,15 @@ function App() {
   const isMaster = currentUser && currentUser.role === "master";
   const canAccess = t => canAccessForUser(t, currentUser);
 
-  const closeLogin = () => { setLogin(false); setPendingTab(null); };
-  const goTab = t => {
-    if (canAccess(t)) { setTab(t.id); return; }
-    setPendingTab(t.id); setLogin(true);
-  };
-  const onLogin = user => {
-    setCurrentUser(user); setAuthed(true); setLogin(false); saveSession(user);
-    const requested = TABS.find(t => t.id === pendingTab);
-    const requestedAllowed = requested && canAccessForUser(requested, user);
-    const first = requestedAllowed ? requested : user&&user.role==="master" ? TABS.find(t=>t.id==="laudo") : TABS.find(t=>canAccessForUser(t,user)&&!t.free);
-    setPendingTab(null); setTab((first&&first.id)||"laudo");
-  };
+  const goTab = t => { if (canAccess(t)) setTab(t.id); };
+  const visibleTabs = TABS.filter(canAccess);
 
   useEffect(() => { try { sessionStorage.setItem("meca/tab", tab); } catch(_e) {} }, [tab]);
 
   useEffect(() => {
     const current = TABS.find(t => t.id === tab);
-    if (current && !canAccess(current)) setTab("laudo");
-  }, [tab, currentUser, authed]);
+    if ((!current || !canAccess(current)) && visibleTabs.length) setTab(visibleTabs[0].id);
+  }, [tab, currentUser]);
 
   if (loading) return (
     <div style={{minHeight:"100vh",background:C.navy,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,fontFamily:"'Barlow',sans-serif",padding:24}}>
@@ -3109,7 +3314,6 @@ function App() {
 
   return (
     <div style={{minHeight:"100vh",background:C.navy,fontFamily:"'Barlow',sans-serif",color:C.text}}>
-      {showLogin&&<LoginOverlay onLogin={onLogin} onCancel={closeLogin}/>}
       {changePw&&<ChangePwModal onClose={()=>setChangePw(false)}/>}
 
       {/* Header */}
@@ -3120,17 +3324,16 @@ function App() {
           : <span style={{fontSize:11,color:"#f39c12",background:"rgba(243,156,18,0.12)",border:"1px solid #f39c1233",borderRadius:20,padding:"2px 10px",flexShrink:0}}>⚠ Local</span>
         }
         <div style={row}>
-          {authed&&<span style={{fontSize:12,color:C.muted}}>{isMaster?"Master":(currentUser&&currentUser.name)||(currentUser&&currentUser.login)}</span>}
-          {isMaster&&<button style={{...btn("ghost"),fontSize:12,padding:"6px 12px"}} onClick={()=>setChangePw(true)}><Icon d={IC.key} size={13}/>Alterar Senha</button>}
-          {authed&&<button style={{...btn("ghost"),fontSize:12,padding:"6px 12px"}} onClick={async()=>{await flush();saveSession(null);setAuthed(false);setCurrentUser(null);setPendingTab(null);setTab("laudo");}}><Icon d={IC.lock} size={13}/>Sair</button>}
-          {!authed&&<button style={{...btn("primary"),fontSize:12,padding:"6px 14px"}} onClick={()=>setLogin(true)}><Icon d={IC.lock} size={13}/>Entrar</button>}
+          <span style={{fontSize:12,color:C.muted}}>{(currentUser&&currentUser.name)||(currentUser&&currentUser.login)}{isMaster?" · Master":""}</span>
+          <button style={{...btn("ghost"),fontSize:12,padding:"6px 12px"}} onClick={()=>setChangePw(true)}><Icon d={IC.key} size={13}/>Alterar Senha</button>
+          <button style={{...btn("ghost"),fontSize:12,padding:"6px 12px"}} onClick={async()=>{await flush();onSair();}}><Icon d={IC.lock} size={13}/>Sair</button>
         </div>
       </div>
 
       {/* Tabs */}
       <div style={{display:"flex",gap:4,padding:"14px 20px 0",borderBottom:"1px solid "+C.border,flexWrap:"wrap",overflowX:"auto"}}>
-        {TABS.map(t=>{
-          const active=tab===t.id, locked=!canAccess(t);
+        {visibleTabs.map(t=>{
+          const active=tab===t.id, locked=false;
           return <button key={t.id} onClick={()=>goTab(t)}
             style={{display:"flex",alignItems:"center",gap:6,padding:"9px 16px",borderRadius:"8px 8px 0 0",
               border:"none",cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:"inherit",
@@ -3200,16 +3403,14 @@ function App() {
             onSaveClient={c=>upsert(clients,setClients,c)} onSaveAppt={a=>upsert(schedule,setSchedule,a)}/>}
 
         {tab==="usuarios"&&canAccess(TABS.find(t=>t.id==="usuarios"))&&
-          <TabUsuarios data={users}
-            onSave={u=>upsert(users,setUsers,u)}
-            onDelete={id=>remove(users,setUsers,id)}/>}
+          <TabUsuarios currentUser={currentUser}/>}
       </div>
     </div>
   );
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App/>);
+root.render(<Portao/>);
   </script>
   <script>
     // Setar logo e marca d'água com o JPEG real
