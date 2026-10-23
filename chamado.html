@@ -189,15 +189,6 @@ function showErr(msg) {
   el.scrollIntoView({behavior:"smooth",block:"center"});
 }
 
-// Converte snap do Firebase para array limpo (igual ao toRecordList do app)
-function snapToArray(snap) {
-  var v = snap.val();
-  if (!v) return [];
-  if (Array.isArray(v)) return v.filter(function(x) { return x && x.id; });
-  // Objeto (do Firebase push ou salvo pelo app)
-  return Object.values(v).filter(function(x) { return x && x.id; });
-}
-
 function submit() {
   document.getElementById("errEl").style.display = "none";
   var name = g("iName"), phone = g("iPhone"), addr = g("iAddr"),
@@ -282,23 +273,9 @@ var waMsg =
   }
 
   if (db && connected) {
-    // Salvar EXATAMENTE como o app faz:
-    // Ler array atual → adicionar item → salvar array completo com .set()
-    var salvarAgend = db.ref("meca/schedule").once("value").then(function(snap) {
-      var arr = snapToArray(snap);
-      arr.unshift(agend); // adiciona no início (mais recente primeiro)
-      return db.ref("meca/schedule").set(arr);
-    });
-
-    var salvarCli = db.ref("meca/clients").once("value").then(function(snap) {
-      var arr = snapToArray(snap);
-      // Não duplicar cliente
-      var existe = arr.find(function(c) { return c.phone === phone && c.name === name; });
-      if (!existe) arr.unshift(cli);
-      return db.ref("meca/clients").set(arr);
-    });
-
-    Promise.all([salvarAgend, salvarCli])
+    // O formulário público só pode criar o chamado na caixa de entrada;
+    // o MecaApp (com login) move para Agendamento e Clientes.
+    db.ref("entrada/chamados/" + id).set({ agend: agend, cliente: cli, criadoEm: new Date().toISOString() })
       .then(function() { console.log("✓ Salvo no Firebase"); mostrar(); })
       .catch(function(e) { console.error("Firebase erro:", e); mostrar(); });
   } else {
