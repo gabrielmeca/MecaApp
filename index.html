@@ -2193,6 +2193,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
         <div style={pvKV}>
           <span style={{color:C.muted}}>Responsável</span><b>{ch.responsavel||"—"}</b><span style={{color:C.muted}}>WhatsApp</span><b>{pvTel(ch.whatsapp)}</b>
           <span style={{color:C.muted}}>Cidade</span><b>{ch.cidade||"—"}</b><span style={{color:C.muted}}>Torres</span><b>{ch.torres} · {pvBRL(ch.valorSemestral||(ch.torres||1)*PV.preco)}</b>
+          {ch.custosPedagios!=null&&<><span style={{color:C.muted}}>Deslocamento</span><b>{ch.valorDeslocamento!=null?pvBRL(ch.valorDeslocamento)+" · "+String(ch.deslocamentoKm).replace(".",",")+" km"+(ch.deslocamentoAproximado?" (aprox.)":""):"a calcular"}</b><span style={{color:C.muted}}>Custos/pedágios</span><b>{pvBRL(ch.custosPedagios)}</b><span style={{color:C.muted}}>Total</span><b style={{color:C.orange}}>{pvBRL(ch.valorTotal)}{ch.valorDeslocamento==null?" + desl.":""}</b></>}
           <span style={{color:C.muted}}>Pagamento</span><b>{ch.pagamento||"A definir"}</b><span style={{color:C.muted}}>Recebido</span><b>{ch.dataSolicitacao?new Date(ch.dataSolicitacao).toLocaleDateString("pt-BR"):"—"}</b>
         </div>
         {ch.endereco&&<div style={{fontSize:12,color:C.muted}}>📍 {ch.endereco}</div>}
