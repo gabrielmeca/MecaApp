@@ -2180,10 +2180,12 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
     </div>;
   }
   else if(view==="chamados"){
-    const lista=chamados.filter(ch=>{const s=pvChStatus(ch);return fCh==="todos"||(fCh==="abertos"?(s==="novo"||s==="contato"):s===fCh);}).sort((a,b)=>(a.dataSolicitacao||"")<(b.dataSolicitacao||"")?1:-1);
+    const noFiltro=(ch,f)=>{const s=pvChStatus(ch);return f==="todos"||(f==="abertos"?(s==="novo"||s==="contato"):s===f);};
+    const lista=chamados.filter(ch=>noFiltro(ch,fCh)).sort((a,b)=>(a.dataSolicitacao||"")<(b.dataSolicitacao||"")?1:-1);
+    const FILTROS_CH=[["abertos","Em aberto"],["convertido","Contratados"],["recusado","Recusados"],["todos","Todos"]];
     corpo=<div>
       <div style={{...row,flexWrap:"wrap",marginBottom:14}}>
-        <select style={{...inp,width:"auto"}} value={fCh} onChange={e=>setFCh(e.target.value)}><option value="abertos">Em aberto</option>{Object.entries(PVCH).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}<option value="todos">Todos</option></select>
+        {FILTROS_CH.map(([k,l])=>{const n=chamados.filter(ch=>noFiltro(ch,k)).length;return <button key={k} onClick={()=>setFCh(k)} style={{padding:"7px 12px",borderRadius:20,border:"1px solid "+(fCh===k?C.blueL:C.border),background:fCh===k?"rgba(106,159,216,0.15)":C.navy,color:fCh===k?C.blueL:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{l} ({n})</button>;})}
         <div style={{flex:1}}/>
         <button style={btn("ghost")} onClick={()=>window.open("meca-contratacao.html","_blank")}>🔗 Formulário do cliente</button>
         <button style={btn("primary")} onClick={()=>setModal({t:"colar"})}>Colar mensagem do WhatsApp</button>
@@ -2198,14 +2200,19 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
         </div>
         {ch.endereco&&<div style={{fontSize:12,color:C.muted}}>📍 {ch.endereco}{ch.cep?" · CEP "+ch.cep:""}</div>}
         {ch.obs&&<div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>{ch.obs}</div>}
+        {s==="recusado"&&<div style={{fontSize:12,color:"#e0a0a0",background:"rgba(231,76,60,0.08)",border:"1px solid rgba(231,76,60,0.25)",borderRadius:7,padding:"7px 10px"}}>✕ Recusado{ch.recusadoEm?" em "+pvData(ch.recusadoEm):""}{ch.motivoRecusa?" – "+ch.motivoRecusa:""}</div>}
         <div style={{...row,flexWrap:"wrap",gap:6}}>
           {s!=="convertido"&&<button style={pvSm("primary")} onClick={()=>converter(ch)}><Icon d={IC.check} size={13}/>Fechar contrato</button>}
           {s==="convertido"&&porId(ch.contratoId)&&<button style={pvSm("blue")} onClick={()=>setModal({t:"contrato",init:porId(ch.contratoId)})}>Ver contrato</button>}
           <button style={pvWAbtn} onClick={()=>setModal({t:"waCh",id:ch.id})}>📲 WhatsApp</button>
           {s==="novo"&&<button style={pvSm("ghost")} onClick={()=>onSaveChamado({...ch,status:"contato"})}>Em contato</button>}
-          {(s==="novo"||s==="contato")&&<button style={pvSm("ghost")} onClick={()=>onSaveChamado({...ch,status:"recusado"})}>Recusar</button>}
-          {s==="recusado"&&<button style={pvSm("ghost")} onClick={()=>onSaveChamado({...ch,status:"novo"})}>Reabrir</button>}
-          {s==="recusado"&&<button style={pvSm("danger")} onClick={()=>{if(window.confirm("Excluir este chamado?"))onDeleteChamado(ch.id);}}><Icon d={IC.trash} size={13}/></button>}
+          {(s==="novo"||s==="contato")&&<button style={pvSm("ghost")} onClick={()=>{
+            const motivo=window.prompt("Motivo da recusa (opcional). O chamado fica guardado em Recusados.","");
+            if(motivo===null) return;
+            onSaveChamado({...ch,status:"recusado",recusadoEm:pvHoje(),motivoRecusa:motivo.trim()});
+            flash("Chamado guardado em Recusados.");
+          }}>Recusar</button>}
+          {s==="recusado"&&<button style={pvSm("ghost")} onClick={()=>onSaveChamado({...ch,status:"novo",recusadoEm:"",motivoRecusa:""})}>Reabrir</button>}
         </div>
       </div>;})}</div>}
     </div>;
