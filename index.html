@@ -1840,6 +1840,26 @@ function pvAtraso(c){ if(!c.pgtoPendente||!c.vencPgto) return 0; const d=-pvDias
 function pvPix(c){ return /pix/i.test(c.pgto||""); }
 function pvHist(c,t){ return [{d:pvHoje(),t},...(c.hist||[])].slice(0,40); }
 function pvChStatus(ch){ const s=String(ch.status||"novo").toLowerCase(); return PVCH[s]?s:"novo"; }
+// Parcelas: abertas a partir da forma de pagamento que o cliente escolheu
+function pvTotal(c){ return pvValor(c)+(Number(c.valorExtras)||0); }
+function pvNParc(pgto){ if(/pix/i.test(pgto||"")) return PV.meses; const m=String(pgto||"").match(/(\d+)\s*x/i); return m?Math.max(1,parseInt(m[1],10)):1; }
+function pvGerarParcelas(total, n, venc1){
+  const cents=Math.round(total*100), base=Math.floor(cents/n);
+  return Array.from({length:n},(_,i)=>({n:i+1,venc:pvAddMonths(venc1,i),valor:(base+(i===n-1?cents-base*n:0))/100,pagoEm:""}));
+}
+function pvParcs(c){ return Array.isArray(c&&c.parcelas)?c.parcelas:[]; }
+function pvAbertas(c){ return pvParcs(c).filter(p=>!p.pagoEm); }
+function pvProxParc(c){ return pvAbertas(c).sort((a,b)=>a.venc<b.venc?-1:1)[0]||null; }
+function pvParcAtraso(p){ if(!p||p.pagoEm||!p.venc) return 0; const d=-pvDias(p.venc); return d>0?d:0; }
+function pvAReceber(c){ return pvParcs(c).length?pvAbertas(c).reduce((t,p)=>t+(Number(p.valor)||0),0):(c.pgtoPendente?pvTotal(c):0); }
+function pvParcNome(c,p){ const n=pvParcs(c).length; return n>1?"parcela "+p.n+"/"+n:"pagamento"; }
+// Vencimento, pendência e quitação do contrato acompanham as parcelas
+function pvSync(c){
+  const ps=pvParcs(c); if(!ps.length) return c;
+  const prox=pvProxParc(c);
+  if(prox) return {...c,vencPgto:prox.venc,pgtoPendente:true,dataQuitacao:""};
+  return {...c,vencPgto:"",pgtoPendente:false,dataQuitacao:ps.map(p=>p.pagoEm).sort().pop()};
+}
 // Agendamento ativo do ciclo atual (cancelado conta como "sem agendamento")
 function pvAppt(c, schedule){ return c.apptId ? (schedule||[]).find(a=>a.id===c.apptId)||null : null; }
 function pvPrev(ap){ if(!ap||ap.status==="cancelado") return "sem"; return ap.status==="concluido"?"concluida":"agendada"; }
@@ -1851,9 +1871,9 @@ function pvAlertas(contratos, chamados, schedule){
   contratos.forEach(c=>{
     if(c.status!=="ativo") return;
     const at=pvAtraso(c), ap=pvAppt(c,schedule), pv=pvPrev(ap);
-    if(at>PV.tolPix&&pvPix(c)) L.push({n:"alto",ic:"⛔",t:c.nome+": PIX atrasado há "+at+" dias",s:"Passou da tolerância de "+PV.tolPix+" dias: regra de cancelamento automático. Venceu em "+pvData(c.vencPgto)+".",id:c.id,wa:"cobranca",pagar:1,cancelar:1});
-    else if(at>0) L.push({n:"medio",ic:"💳",t:c.nome+": pagamento atrasado há "+at+" dia(s)",s:"Venceu em "+pvData(c.vencPgto)+(pvPix(c)?". Cancelamento automático após "+PV.tolPix+" dias.":"."),id:c.id,wa:"cobranca",pagar:1});
-    else if(c.pgtoPendente&&c.vencPgto&&pvDias(c.vencPgto)<=3){ const d=pvDias(c.vencPgto); L.push({n:"info",ic:"💰",t:c.nome+": pagamento vence "+(d===0?"hoje":"em "+d+" dia(s)"),s:pvBRL(pvValor(c))+" · "+(c.pgto||"A definir"),id:c.id,wa:"lembrete",pagar:1}); }
+    if(at>PV.tolPix&&pvPix(c)) L.push({n:"alto",ic:"⛔",t:c.nome+": PIX atrasado há "+at+" dias"+(pvProxParc(c)?" ("+pvParcNome(c,pvProxParc(c))+")":""),s:"Passou da tolerância de "+PV.tolPix+" dias: regra de cancelamento automático. Venceu em "+pvData(c.vencPgto)+".",id:c.id,wa:"cobranca",pagar:1,cancelar:1});
+    else if(at>0) L.push({n:"medio",ic:"💳",t:c.nome+": "+(pvProxParc(c)?pvParcNome(c,pvProxParc(c)):"pagamento")+" atrasado há "+at+" dia(s)",s:"Venceu em "+pvData(c.vencPgto)+(pvPix(c)?". Cancelamento automático após "+PV.tolPix+" dias.":"."),id:c.id,wa:"cobranca",pagar:1});
+    else if(c.pgtoPendente&&c.vencPgto&&pvDias(c.vencPgto)<=3){ const d=pvDias(c.vencPgto); const p=pvProxParc(c); L.push({n:"info",ic:"💰",t:c.nome+": "+(p?pvParcNome(c,p):"pagamento")+" vence "+(d===0?"hoje":"em "+d+" dia(s)"),s:pvBRL(p?p.valor:pvTotal(c))+" · "+(c.pgto||"A definir"),id:c.id,wa:"lembrete",pagar:1}); }
     if(pv!=="concluida"){
       const pz=pvPrazo(c);
       if(pz){
@@ -1880,13 +1900,14 @@ function pvAlertas(contratos, chamados, schedule){
 }
 
 const PV_WA = [["boasvindas","Contrato confirmado"],["lembrete","Lembrete de pagamento"],["cobranca","Cobrança de atraso"],["agendar","Pedir data da preventiva"],["confirmacao","Confirmar agendamento"],["concluida","Preventiva concluída"],["renovacao","Renovação"],["cancelamento","Cancelamento"]];
-function pvMsg(tipo, c, ap){
-  const v=pvBRL(pvValor(c));
+function pvMsg(tipo, c, ap, parc){
+  const v=pvBRL(pvTotal(c)), ps=pvParcs(c), pp=parc||pvProxParc(c);
+  const pgDesc=pp?pvParcNome(c,pp)+" ("+pvBRL(pp.valor)+")":"("+v+")", pgVenc=pp?pp.venc:c.vencPgto, pgAtraso=pp?pvParcAtraso(pp):pvAtraso(c);
   const L={
     chamado:["Olá, "+(c.resp||c.nome)+"! Recebemos sua solicitação de manutenção preventiva (protocolo "+c.protocolo+").","",`*Torres:* ${c.torres}`,`*Investimento semestral:* ${v}`,"","Em breve entraremos em contato para confirmar o contrato e o pagamento."],
-    boasvindas:["Olá, "+(c.resp||c.nome)+"! Seu contrato de manutenção preventiva está confirmado.","",`*Torres:* ${c.torres} (${c.torres} lavadora(s) + ${c.torres} secadora(s))`,`*Valor semestral:* ${v}`,`*Pagamento:* ${c.pgto||"A definir"}`,`*Vigência:* ${pvData(c.dataContrato)} a ${pvData(pvFim(c))}`,"",`PIX com atraso acima de ${PV.tolPix} dias gera cancelamento automático. O agendamento deve ser feito com ${PV.antecedencia} dias de antecedência, e a preventiva é realizada em até 2 meses após a quitação.`],
-    lembrete:["Olá, "+(c.resp||c.nome)+"! Lembrete: o pagamento do seu contrato de preventiva ("+v+") vence em "+pvData(c.vencPgto)+".",`*Forma:* ${c.pgto||"A definir"}`,"","Se já pagou, desconsidere."],
-    cobranca:["Olá, "+(c.resp||c.nome)+". O pagamento do seu contrato de preventiva, vencido em "+pvData(c.vencPgto)+", está em aberto ("+pvAtraso(c)+" dia(s) de atraso).","",`Pagamentos via PIX com atraso superior a ${PV.tolPix} dias geram cancelamento automático. Por favor, regularize e envie o comprovante.`],
+    boasvindas:["Olá, "+(c.resp||c.nome)+"! Seu contrato de manutenção preventiva está confirmado.","",`*Torres:* ${c.torres} (${c.torres} lavadora(s) + ${c.torres} secadora(s))`,`*Valor semestral:* ${v}`,`*Pagamento:* ${c.pgto||"A definir"}`+(ps.length>1?` em ${ps.length} parcelas`:""),...(ps.length?ps.map(p=>`  ${p.n}ª: ${pvData(p.venc)} – ${pvBRL(p.valor)}${p.pagoEm?" (paga)":""}`):[]),`*Vigência:* ${pvData(c.dataContrato)} a ${pvData(pvFim(c))}`,"",`PIX com atraso acima de ${PV.tolPix} dias gera cancelamento automático. O agendamento deve ser feito com ${PV.antecedencia} dias de antecedência, e a preventiva é realizada em até 2 meses após a quitação.`],
+    lembrete:["Olá, "+(c.resp||c.nome)+"! Lembrete: "+(pp&&ps.length>1?"a "+pgDesc:"o pagamento "+pgDesc)+" do seu contrato de preventiva vence em "+pvData(pgVenc)+".",`*Forma:* ${c.pgto||"A definir"}`,"","Se já pagou, desconsidere."],
+    cobranca:["Olá, "+(c.resp||c.nome)+". "+(pp&&ps.length>1?"A "+pgDesc:"O pagamento "+pgDesc)+" do seu contrato de preventiva, vencido em "+pvData(pgVenc)+", está em aberto ("+pgAtraso+" dia(s) de atraso).","",pvPix(c)?`Pagamentos via PIX com atraso superior a ${PV.tolPix} dias geram cancelamento automático. Por favor, regularize e envie o comprovante.`:"Por favor, regularize e envie o comprovante."],
     agendar:["Olá, "+(c.resp||c.nome)+"! Vamos agendar a manutenção preventiva das suas "+c.torres+" torre(s).","",`O agendamento precisa ter no mínimo ${PV.antecedencia} dias de antecedência`+(pvPrazo(c)?" e a preventiva deve ser feita até "+pvData(pvPrazo(c)):"")+".","Qual a melhor data e horário?"],
     confirmacao:["Olá, "+(c.resp||c.nome)+"! Confirmando sua manutenção preventiva:","",`*Data:* ${pvData(ap&&ap.date)}`+(ap&&ap.time?" às "+ap.time:""),ap&&ap.techName?`*Técnico:* ${ap.techName}`:"",`*Local:* ${c.endereco||c.cidade||"—"}`,`*Torres:* ${c.torres}`,"","Por favor, confirme respondendo esta mensagem."],
     concluida:["Olá, "+(c.resp||c.nome)+"! A manutenção preventiva das suas "+c.torres+" torre(s) foi concluída"+(ap&&ap.date?" em "+pvData(ap.date):"")+". Obrigado pela confiança!"],
@@ -1913,13 +1934,13 @@ const pvSm = v=>({...btn(v),padding:"6px 11px",fontSize:12});
 const pvWAbtn = {background:"#25D366",border:"none",borderRadius:7,padding:"6px 11px",fontSize:12,fontWeight:700,color:"#fff",cursor:"pointer",fontFamily:"inherit"};
 const pvKV = {display:"grid",gridTemplateColumns:"auto 1fr",gap:"3px 12px",fontSize:12};
 
-function PvWAModal({c, ap, tipo, phone, title, onClose, onSent}){
+function PvWAModal({c, ap, parc, tipo, phone, title, onClose, onSent}){
   const [t,setT]=useState(tipo);
-  const [txt,setTxt]=useState(pvMsg(tipo,c,ap));
+  const [txt,setTxt]=useState(pvMsg(tipo,c,ap,parc));
   return <Modal title={"WhatsApp – "+(title||c.nome)} onClose={onClose} maxWidth={560}>
     <div style={{fontSize:12,color:C.muted,marginBottom:10}}>Para {pvTel(phone)}</div>
     {tipo!=="chamado"&&<div style={{...fld,marginBottom:10}}><label style={lbl}>Modelo</label>
-      <select style={inp} value={t} onChange={e=>{setT(e.target.value);setTxt(pvMsg(e.target.value,c,ap));}}>{PV_WA.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></div>}
+      <select style={inp} value={t} onChange={e=>{setT(e.target.value);setTxt(pvMsg(e.target.value,c,ap,parc));}}>{PV_WA.map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></div>}
     <div style={fld}><label style={lbl}>Mensagem (pode editar)</label><textarea style={{...inp,minHeight:220,resize:"vertical"}} value={txt} onChange={e=>setTxt(e.target.value)}/></div>
     <div style={{...row,justifyContent:"flex-end",marginTop:16}}>
       <button style={btn("ghost")} onClick={onClose}>Cancelar</button>
@@ -1929,8 +1950,28 @@ function PvWAModal({c, ap, tipo, phone, title, onClose, onSent}){
 }
 
 function PvContratoModal({initial, clients, onSave, onClose, extras}){
-  const [f,setF]=useState({torres:1,pgto:"A definir",dataContrato:pvHoje(),vencPgto:pvHoje(),pgtoPendente:true,dataQuitacao:"",status:"ativo",clienteId:"",nome:"",resp:"",telefone:"",email:"",endereco:"",cidade:"",uf:"",obs:"",...initial});
-  const s=k=>e=>setF(p=>({...p,[k]:e.target.value}));
+  const [f,setF]=useState(()=>{
+    const b={torres:1,pgto:"A definir",dataContrato:pvHoje(),vencPgto:pvHoje(),pgtoPendente:true,dataQuitacao:"",status:"ativo",valorExtras:0,clienteId:"",nome:"",resp:"",telefone:"",email:"",endereco:"",cidade:"",uf:"",obs:"",...initial};
+    const ps=pvParcs(b);
+    b.nParc=ps.length||pvNParc(b.pgto);
+    b.venc1=(ps[0]||{}).venc||b.vencPgto||b.dataContrato;
+    if(!ps.length&&!b.id) b.parcelas=pvGerarParcelas(pvTotal(b),b.nParc,b.venc1);
+    return b;
+  });
+  // Refaz as parcelas quando muda forma, quantidade, 1º vencimento ou valor (só se nenhuma foi paga)
+  const replan=(p,patch)=>{
+    const n={...p,...patch};
+    if("pgto" in patch) n.nParc=pvNParc(n.pgto);
+    if(["pgto","nParc","venc1","torres","valorExtras"].some(k=>k in patch)&&pvParcs(p).length&&!pvParcs(p).some(x=>x.pagoEm)){
+      const q=Math.max(1,Math.min(24,parseInt(n.nParc,10)||1));
+      n.parcelas=pvGerarParcelas(pvTotal(n),q,n.venc1||n.dataContrato||pvHoje());
+    }
+    return n;
+  };
+  const s=k=>e=>{const v=e.target.value;setF(p=>replan(p,{[k]:v}));};
+  const setParc=(i,patch)=>setF(p=>({...p,parcelas:pvParcs(p).map((x,j)=>j===i?{...x,...patch}:x)}));
+  const gerar=()=>setF(p=>({...p,parcelas:pvGerarParcelas(pvTotal(p),Math.max(1,Math.min(24,parseInt(p.nParc,10)||1)),p.venc1||p.dataContrato||pvHoje())}));
+  const somaParc=pvParcs(f).reduce((t,p)=>t+(Number(p.valor)||0),0);
   const vincular=id=>{
     const cl=clients.find(x=>x.id===id);
     if(!cl){ setF(p=>({...p,clienteId:""})); return; }
@@ -1940,8 +1981,11 @@ function PvContratoModal({initial, clients, onSave, onClose, extras}){
   const salvar=()=>{
     const t=parseInt(f.torres,10);
     if(!String(f.nome).trim()||pvDig(f.telefone).length<10||!(t>0)||!f.dataContrato){alert("Preencha nome, WhatsApp com DDD, torres e início do contrato.");return;}
-    const pend=String(f.pgtoPendente)==="true";
-    onSave({...f,torres:t,pgtoPendente:pend,dataQuitacao:!pend&&!f.dataQuitacao?pvHoje():f.dataQuitacao,id:f.id||("pv_"+uid())});
+    const ps=pvParcs(f).map(p=>({...p,valor:Math.round((Number(p.valor)||0)*100)/100}));
+    if(ps.some(p=>!p.venc)){alert("Informe o vencimento de todas as parcelas.");return;}
+    const {nParc,venc1,...resto}=f;
+    // JSON remove campos undefined (ex.: chamado sem e-mail), que o Firebase recusa
+    onSave(JSON.parse(JSON.stringify(pvSync({...resto,torres:t,valorExtras:Number(f.valorExtras)||0,parcelas:ps,id:f.id||("pv_"+uid())}))));
   };
   return <Modal title={f.id?"Editar contrato":"Novo contrato de preventiva"} onClose={onClose} maxWidth={680}>
     {f.protocolo&&<div style={{fontSize:12,color:C.muted,marginBottom:12}}>Protocolo <b style={{color:C.orange,fontFamily:"monospace"}}>{f.protocolo}</b></div>}
@@ -1955,10 +1999,23 @@ function PvContratoModal({initial, clients, onSave, onClose, extras}){
       {F("endereco","Endereço","text",true)}{F("cidade","Cidade")}{F("uf","UF")}
       {F("torres","Torres (lavadora + secadora) *","number")}
       <div style={fld}><label style={lbl}>Valor semestral</label><input style={{...inp,color:C.orange,fontWeight:700}} disabled value={pvBRL((parseInt(f.torres,10)||0)*PV.preco)}/></div>
+      {F("valorExtras","Deslocamento e custos (R$)","number")}
+      <div style={fld}><label style={lbl}>Total a cobrar</label><input style={{...inp,color:C.orange,fontWeight:700}} disabled value={pvBRL(pvTotal(f))}/></div>
+      {F("dataContrato","Início do contrato *","date")}
       <div style={fld}><label style={lbl}>Forma de pagamento</label><select style={inp} value={f.pgto} onChange={s("pgto")}>{[...new Set([...PV_PGTOS,f.pgto])].map(p=><option key={p}>{p}</option>)}</select></div>
-      {F("dataContrato","Início do contrato *","date")}{F("vencPgto","Vencimento do pagamento","date")}
-      <div style={fld}><label style={lbl}>Pagamento</label><select style={inp} value={String(f.pgtoPendente)} onChange={s("pgtoPendente")}><option value="true">Pendente</option><option value="false">Em dia / quitado</option></select></div>
-      {F("dataQuitacao","Data de quitação","date")}
+      {F("nParc","Nº de parcelas","number")}{F("venc1","1º vencimento","date")}
+      <div style={{...fld,gridColumn:"1/-1"}}><label style={lbl}>Parcelas</label>
+        {pvParcs(f).length===0?<div style={{...row,flexWrap:"wrap",fontSize:12,color:C.muted}}>Contrato sem parcelas (cadastrado antes do controle de pagamentos).<button style={pvSm("blue")} onClick={gerar}>Gerar parcelas</button></div>
+        :<div>{pvParcs(f).map((p,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"34px 1fr 1fr 110px",gap:8,alignItems:"center",marginTop:i?6:0}}>
+          <b style={{fontSize:12,color:C.muted}}>{p.n}ª</b>
+          <input type="date" style={inp} value={p.venc||""} disabled={!!p.pagoEm} onChange={e=>setParc(i,{venc:e.target.value})}/>
+          <input type="number" step="0.01" style={inp} value={p.valor} disabled={!!p.pagoEm} onChange={e=>setParc(i,{valor:e.target.value})}/>
+          <span style={{fontSize:11,fontWeight:700,color:p.pagoEm?"#2ecc71":pvParcAtraso(p)?"#e74c3c":C.muted}}>{p.pagoEm?"Paga "+pvData(p.pagoEm):pvParcAtraso(p)?"Atrasada "+pvParcAtraso(p)+"d":"Em aberto"}</span>
+        </div>)}
+        {Math.abs(somaParc-pvTotal(f))>0.009&&<div style={{fontSize:12,color:"#f39c12",marginTop:6}}>⚠ Soma das parcelas ({pvBRL(somaParc)}) diferente do total ({pvBRL(pvTotal(f))}).</div>}
+        {pvParcs(f).some(p=>p.pagoEm)&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Já há parcelas pagas: as parcelas não são refeitas automaticamente, ajuste as que estão em aberto.</div>}
+        </div>}
+      </div>
       <div style={fld}><label style={lbl}>Situação</label><select style={inp} value={f.status} onChange={s("status")}>{Object.entries(PVST).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></div>
       <div style={{...fld,gridColumn:"1/-1"}}><label style={lbl}>Obs.</label><textarea style={{...inp,minHeight:60,resize:"vertical"}} value={f.obs||""} onChange={s("obs")}/></div>
     </div>
@@ -2005,26 +2062,39 @@ function PvAgendarModal({c, ap, tecnicos, onSave, onRemove, onClose}){
   </Modal>;
 }
 
-function PvPagarModal({c, onParcela, onQuitado, onClose}){
-  const [d,setD]=useState(pvHoje());
-  const [prox,setProx]=useState(pvAddMonths(c.vencPgto||pvHoje(),1));
-  return <Modal title={"Registrar pagamento – "+c.nome} onClose={onClose} maxWidth={480}>
+function pvParcTag(p){
+  if(p.pagoEm) return pvTag("Paga "+pvData(p.pagoEm).slice(0,5),"#2ecc71");
+  const at=pvParcAtraso(p), d=pvDias(p.venc);
+  if(at) return pvTag("Atrasada "+at+"d","#e74c3c");
+  return pvTag(d===0?"Vence hoje":"Vence em "+d+"d",d<=3?"#f39c12":C.blueL);
+}
+function PvPagarModal({c, onBaixa, onDesfazer, onGerar, onCobrar, onClose}){
+  const [datas,setDatas]=useState({});
+  const ps=pvParcs(c), pago=ps.filter(p=>p.pagoEm).reduce((t,p)=>t+(Number(p.valor)||0),0);
+  const vencido=pvAbertas(c).filter(p=>pvParcAtraso(p)).reduce((t,p)=>t+(Number(p.valor)||0),0);
+  return <Modal title={"Pagamentos – "+c.nome} onClose={onClose} maxWidth={640}>
     <div style={{...pvKV,marginBottom:14}}>
-      <span style={{color:C.muted}}>Valor semestral</span><b>{pvBRL(pvValor(c))}</b>
+      <span style={{color:C.muted}}>Total do contrato</span><b>{pvBRL(pvTotal(c))}</b>
       <span style={{color:C.muted}}>Forma</span><b>{c.pgto||"A definir"}</b>
-      <span style={{color:C.muted}}>Vencimento</span><b>{pvData(c.vencPgto)}</b>
-      <span style={{color:C.muted}}>Atraso</span><b>{pvAtraso(c)} dia(s)</b>
+      {ps.length>0&&<><span style={{color:C.muted}}>Recebido</span><b style={{color:"#2ecc71"}}>{pvBRL(pago)}</b>
+      <span style={{color:C.muted}}>Em aberto</span><b>{pvBRL(pvAReceber(c))}{vencido?<span style={{color:"#e74c3c"}}> · vencido {pvBRL(vencido)}</span>:null}</b></>}
     </div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-      <div style={fld}><label style={lbl}>Data do pagamento</label><input type="date" style={inp} value={d} onChange={e=>setD(e.target.value)}/></div>
-      <div style={fld}><label style={lbl}>Próx. vencimento (parcela)</label><input type="date" style={inp} value={prox} onChange={e=>setProx(e.target.value)}/></div>
-    </div>
-    <div style={{fontSize:12,color:C.muted,marginTop:10}}>"Quitado" libera o prazo de 2 meses para a preventiva. "Parcela paga" mantém o contrato com próximo vencimento.</div>
-    <div style={{...row,justifyContent:"flex-end",marginTop:18,flexWrap:"wrap"}}>
-      <button style={btn("ghost")} onClick={onClose}>Cancelar</button>
-      <button style={btn("blue")} onClick={()=>prox&&onParcela(d,prox)}>Parcela paga</button>
-      <button style={btn("primary")} onClick={()=>onQuitado(d)}>Contrato quitado</button>
-    </div>
+    {ps.length===0?<div style={{fontSize:13,color:C.muted,lineHeight:1.6}}>
+      Este contrato foi cadastrado antes do controle de pagamentos. Gere as parcelas pela forma de pagamento ({c.pgto||"A definir"}: {pvNParc(c.pgto)} parcela(s) a partir de {pvData(c.vencPgto||c.dataContrato)}). Depois é possível ajustar datas e valores em Editar.
+      <div style={{...row,justifyContent:"flex-end",marginTop:14}}><button style={btn("ghost")} onClick={onClose}>Fechar</button><button style={btn("primary")} onClick={onGerar}>Gerar parcelas</button></div>
+    </div>:<div>
+      {ps.map(p=><div key={p.n} style={{...row,flexWrap:"wrap",gap:8,padding:"9px 0",borderTop:"1px solid "+C.navyL}}>
+        <div style={{flex:1,minWidth:150}}><div style={{fontWeight:700}}>{p.n}ª parcela · {pvBRL(p.valor)}{p.ant?<span style={{fontSize:11,color:C.muted}}> (semestre anterior)</span>:null}</div><div style={{fontSize:12,color:C.muted}}>Vencimento {pvData(p.venc)}</div></div>
+        {pvParcTag(p)}
+        {p.pagoEm?<button style={pvSm("ghost")} onClick={()=>onDesfazer(p)}>Desfazer baixa</button>:<>
+          <input type="date" style={{...inp,width:150,padding:"6px 8px"}} value={datas[p.n]||pvHoje()} onChange={e=>setDatas(d=>({...d,[p.n]:e.target.value}))}/>
+          <button style={pvSm("primary")} onClick={()=>onBaixa(p,datas[p.n]||pvHoje())}><Icon d={IC.check} size={13}/>Dar baixa</button>
+          <button style={pvWAbtn} onClick={()=>onCobrar(p)}>📲 {pvParcAtraso(p)?"Cobrar":"Lembrar"}</button>
+        </>}
+      </div>)}
+      <div style={{fontSize:12,color:C.muted,marginTop:10}}>Quando a última parcela recebe baixa o contrato fica quitado e começa o prazo de {PV.prazoMeses} meses para a preventiva.</div>
+      <div style={{...row,justifyContent:"flex-end",marginTop:14}}><button style={btn("ghost")} onClick={onClose}>Fechar</button></div>
+    </div>}
   </Modal>;
 }
 
@@ -2046,6 +2116,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
   const [busca,setBusca]=useState("");
   const [fCli,setFCli]=useState("ativo");
   const [fCh,setFCh]=useState("abertos");
+  const [fPg,setFPg]=useState("vencidas");
   const [msg,setMsg]=useState(null);
   const flash=(t,tp="success")=>{setMsg({text:t,type:tp});setTimeout(()=>setMsg(null),3000);};
   const hoje=pvHoje();
@@ -2084,8 +2155,33 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
     setModal(novo?{t:"wa",id:c.id,tipo:"boasvindas",c}:null);
   };
   const converter=ch=>setModal({t:"contrato",chId:ch.id,init:{protocolo:ch.id,nome:ch.cliente,resp:ch.responsavel,telefone:ch.whatsapp,email:ch.email,endereco:ch.endereco,cidade:ch.cidade,torres:parseInt(ch.torres,10)||1,pgto:ch.pagamento||"A definir",obs:ch.obs,
+    valorExtras:ch.custosPedagios!=null?(Number(ch.valorDeslocamento)||0)+(Number(ch.custosPedagios)||0):0,
     clienteId:(clients.find(c=>pvDig(ch.whatsapp).length>=10&&pvDig(c.phone).slice(-11)===pvDig(ch.whatsapp).slice(-11))||{}).id||""}});
 
+  const pagto={
+    baixa:(c,p,d)=>{
+      const N=pvParcs(c).length, nc=pvSync({...c,parcelas:pvParcs(c).map(x=>x.n===p.n?{...x,pagoEm:d}:x)});
+      onSaveContrato({...nc,hist:pvHist(c,(N>1?"Parcela "+p.n+"/"+N:"Pagamento")+" ("+pvBRL(p.valor)+") recebida em "+pvData(d)+(nc.pgtoPendente?"":" · contrato quitado"))});
+      flash(nc.pgtoPendente?"Baixa registrada.":"Contrato quitado. Prazo da preventiva: "+pvData(pvPrazo(nc)));
+    },
+    desfazer:(c,p)=>{
+      if(!window.confirm("Desfazer a baixa da "+p.n+"ª parcela de "+c.nome+"?")) return;
+      const nc=pvSync({...c,parcelas:pvParcs(c).map(x=>x.n===p.n?{...x,pagoEm:""}:x)});
+      onSaveContrato({...nc,hist:pvHist(c,"Baixa desfeita: parcela "+p.n)});
+    },
+    gerar:c=>{
+      const nc=pvSync({...c,parcelas:pvGerarParcelas(pvTotal(c),pvNParc(c.pgto),c.vencPgto||c.dataContrato||hoje)});
+      onSaveContrato({...nc,hist:pvHist(c,"Parcelas geradas ("+pvParcs(nc).length+"x, "+(c.pgto||"A definir")+")")});
+    },
+    cobrar:(c,p)=>setModal({t:"wa",id:c.id,tipo:pvParcAtraso(p)?"cobranca":"lembrete",parc:p.n}),
+    baixaRapida:(c,p)=>{
+      const r=window.prompt("Data do pagamento da "+p.n+"ª parcela de "+c.nome+" ("+pvBRL(p.valor)+"), dd/mm/aaaa:",pvData(hoje));
+      if(r===null) return;
+      const m=r.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if(!m){alert("Data inválida. Use dd/mm/aaaa.");return;}
+      pagto.baixa(c,p,m[3]+"-"+m[2].padStart(2,"0")+"-"+m[1].padStart(2,"0"));
+    }
+  };
   const acoes={
     agendar:c=>setModal({t:"agendar",id:c.id}),
     pagar:c=>setModal({t:"pagar",id:c.id}),
@@ -2106,7 +2202,10 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
     renovar:c=>{
       const ini=pvFim(c)||hoje;
       if(!window.confirm("Renovar "+c.nome+" por mais 6 meses a partir de "+pvData(ini)+"?")) return;
-      const n={...c,dataContrato:ini,vencPgto:ini,pgtoPendente:true,dataQuitacao:"",apptId:"",status:"ativo",hist:pvHist(c,"Renovado: novo semestre a partir de "+pvData(ini))};
+      const ab=pvAbertas(c).map(p=>({...p,ant:true}));
+      const ps=[...ab,...pvGerarParcelas(pvTotal(c),pvParcs(c).filter(p=>!p.ant).length||pvNParc(c.pgto),ini)].map((p,i)=>({...p,n:i+1}));
+      const ciclos=pvParcs(c).length?[{ini:c.dataContrato,parcelas:pvParcs(c).filter(p=>p.pagoEm)},...(c.ciclos||[])].slice(0,6):(c.ciclos||[]);
+      const n=pvSync({...c,dataContrato:ini,vencPgto:ini,pgtoPendente:true,dataQuitacao:"",apptId:"",status:"ativo",parcelas:ps,ciclos,hist:pvHist(c,"Renovado: novo semestre a partir de "+pvData(ini)+(ab.length?" · "+ab.length+" parcela(s) em aberto do semestre anterior":""))});
       onSaveContrato(n); setModal({t:"wa",id:c.id,tipo:"boasvindas",c:n});
     },
     excluir:c=>{
@@ -2120,7 +2219,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
     return <div style={{...row,flexWrap:"wrap",gap:6}}>
       <button style={pvSm("ghost")} onClick={()=>setModal({t:"contrato",init:c})}><Icon d={IC.edit} size={13}/>Editar</button>
       <button style={pvWAbtn} onClick={()=>acoes.wa(c)}>📲 WhatsApp</button>
-      {c.status==="ativo"&&c.pgtoPendente&&<button style={pvSm("ghost")} onClick={()=>acoes.pagar(c)}>💰 Pagamento</button>}
+      {(c.status==="ativo"&&c.pgtoPendente||pvParcs(c).length>0)&&<button style={pvSm("ghost")} onClick={()=>acoes.pagar(c)}>💰 {pvParcs(c).length?"Parcelas":"Pagamento"}</button>}
       {c.status==="ativo"&&pv!=="concluida"&&<button style={pvSm("blue")} onClick={()=>acoes.agendar(c)}><Icon d={IC.calendar} size={13}/>{pv==="agendada"?"Reagendar":"Agendar"}</button>}
       {c.status==="ativo"&&pv==="agendada"&&<button style={pvSm("ghost")} onClick={()=>acoes.concluir(c)}><Icon d={IC.check} size={13}/>Concluir</button>}
     </div>;
@@ -2130,7 +2229,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
     t.push(pvTag(PVST[c.status].label,PVST[c.status].color));
     if(c.status==="ativo"){
       if(at>0) t.push(pvTag("Pgto atrasado "+at+"d","#e74c3c"));
-      else if(c.pgtoPendente) t.push(pvTag("Pgto pendente","#f39c12"));
+      else if(c.pgtoPendente) t.push(pvTag(pvParcs(c).length>1?(pvParcs(c).length-pvAbertas(c).length)+"/"+pvParcs(c).length+" parcelas pagas":"Pgto pendente","#f39c12"));
       else t.push(pvTag("Quitado","#2ecc71"));
       if(pv==="concluida") t.push(pvTag("Preventiva feita","#2ecc71"));
       else if(pv==="agendada") t.push(pvTag((APST[ap.status]||{label:"Agendada"}).label+" "+pvData(ap.date).slice(0,5),C.blueL));
@@ -2143,14 +2242,15 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
 
   const ativos=contratos.filter(c=>c.status==="ativo");
   const novosCh=chamados.filter(ch=>pvChStatus(ch)==="novo").length;
-  const VIEWS=[["painel","Painel"],["chamados","Chamados"+(novosCh?" ("+novosCh+")":"")],["contratos","Contratos ("+ativos.length+")"],["agenda","A agendar"],["alertas","Alertas"+(al.length?" ("+al.length+")":"")]];
+  const nVenc=ativos.reduce((t,c)=>t+pvAbertas(c).filter(p=>pvParcAtraso(p)).length,0);
+  const VIEWS=[["painel","Painel"],["chamados","Chamados"+(novosCh?" ("+novosCh+")":"")],["contratos","Contratos ("+ativos.length+")"],["pagamentos","Pagamentos"+(nVenc?" ("+nVenc+")":"")],["agenda","A agendar"],["alertas","Alertas"+(al.length?" ("+al.length+")":"")]];
   const grid={display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:12};
   const itemCard=(extra)=>({background:C.navyM,border:"1px solid "+C.border,borderRadius:12,padding:16,display:"flex",flexDirection:"column",gap:10,...extra});
 
   let corpo=null;
   if(view==="painel"){
-    let torres=0,receita=0,pend=0,mes=0; const m=hoje.slice(0,7);
-    ativos.forEach(c=>{torres+=parseInt(c.torres,10)||0;receita+=pvValor(c);if(c.pgtoPendente)pend+=pvValor(c);const ap=pvAppt(c,schedule);if(pvPrev(ap)!=="sem"&&ap.date&&ap.date.slice(0,7)===m)mes++;});
+    let torres=0,receita=0,pend=0,venc=0,mes=0; const m=hoje.slice(0,7);
+    ativos.forEach(c=>{torres+=parseInt(c.torres,10)||0;receita+=pvTotal(c);pend+=pvAReceber(c);venc+=pvAbertas(c).filter(p=>pvParcAtraso(p)).reduce((t,p)=>t+(Number(p.valor)||0),0);const ap=pvAppt(c,schedule);if(pvPrev(ap)!=="sem"&&ap.date&&ap.date.slice(0,7)===m)mes++;});
     const altos=al.filter(a=>a.n==="alto").length;
     const K2=(l,v,cor,d)=><div style={{background:C.navyM,border:"1px solid "+C.border,borderRadius:10,padding:"14px 18px",borderLeft:"3px solid "+cor}}>
       <div style={{fontSize:22,fontWeight:800,color:cor}}>{v}</div><div style={{fontSize:12,color:C.muted,marginTop:2}}>{l}</div>{d&&<div style={{fontSize:11,color:"#3a5880"}}>{d}</div>}</div>;
@@ -2158,7 +2258,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
     corpo=<div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:18}}>
         {K2("Contratos ativos",ativos.length,"#2ecc71")}{K2("Torres sob contrato",torres,C.blueL,torres+" lav. + "+torres+" sec.")}
-        {K2("Receita semestral",pvBRL(receita),C.orange)}{K2("A receber",pvBRL(pend),"#f39c12")}
+        {K2("Receita semestral",pvBRL(receita),C.orange)}{K2("A receber",pvBRL(pend),"#f39c12")}{K2("Vencido",pvBRL(venc),venc?"#e74c3c":"#2ecc71",nVenc+" parcela(s)")}
         {K2("Chamados novos",novosCh,C.orange)}{K2("Alertas críticos",altos,altos?"#e74c3c":"#2ecc71",al.length+" no total")}{K2("Preventivas no mês",mes,C.blueL)}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:16}}>
@@ -2222,16 +2322,45 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
       {lista.length===0?<div style={{...card,textAlign:"center",padding:48,color:"#3a5880"}}>{contratos.length?"Sem resultados.":"Nenhum contrato."}</div>:<div style={grid}>{lista.map(c=>{
         const ap=pvAppt(c,schedule), pz=pvPrazo(c), critico=c.status==="ativo"&&(pvAtraso(c)>PV.tolPix||(pz&&pvDias(pz)<0&&pvPrev(ap)!=="concluida"));
         return <div key={c.id} style={itemCard({borderColor:critico?"#e74c3c88":C.border})}>
-          <div style={{...row,justifyContent:"space-between",alignItems:"flex-start"}}><div><div style={{fontWeight:800,fontSize:15}}>{c.nome}</div>{c.protocolo&&<div style={{fontSize:11,color:C.orange,fontFamily:"monospace"}}>{c.protocolo}</div>}</div><div style={{fontWeight:800,color:C.orange}}>{pvBRL(pvValor(c))}</div></div>
+          <div style={{...row,justifyContent:"space-between",alignItems:"flex-start"}}><div><div style={{fontWeight:800,fontSize:15}}>{c.nome}</div>{c.protocolo&&<div style={{fontSize:11,color:C.orange,fontFamily:"monospace"}}>{c.protocolo}</div>}</div><div style={{fontWeight:800,color:C.orange}}>{pvBRL(pvTotal(c))}</div></div>
           <Tags c={c}/>
           <div style={pvKV}>
             <span style={{color:C.muted}}>WhatsApp</span><b>{pvTel(c.telefone)}</b><span style={{color:C.muted}}>Torres</span><b>{c.torres}</b>
             <span style={{color:C.muted}}>Pagamento</span><b>{c.pgto||"A definir"}</b><span style={{color:C.muted}}>Vigência</span><b>{pvData(c.dataContrato)} a {pvData(pvFim(c))}</b>
+            {pvParcs(c).length>0&&<><span style={{color:C.muted}}>Parcelas</span><b>{pvParcs(c).length-pvAbertas(c).length}/{pvParcs(c).length} pagas{pvProxParc(c)?" · próx. "+pvData(pvProxParc(c).venc):""}</b></>}
             <span style={{color:C.muted}}>Quitação</span><b>{pvData(c.dataQuitacao)}</b><span style={{color:C.muted}}>Prazo preventiva</span><b>{pvData(pz)}</b>
             {ap&&ap.techName&&<><span style={{color:C.muted}}>Técnico</span><b>👷 {ap.techName}</b></>}
           </div>
           <Acts c={c}/>
         </div>;})}</div>}
+    </div>;
+  }
+  else if(view==="pagamentos"){
+    const itens=contratos.flatMap(c=>pvParcs(c).map(p=>({c,p})));
+    const aberto=x=>!x.p.pagoEm&&x.c.status==="ativo";
+    const FIL={vencidas:x=>aberto(x)&&pvParcAtraso(x.p)>0,avencer:x=>aberto(x)&&!pvParcAtraso(x.p),abertas:aberto,pagas:x=>!!x.p.pagoEm};
+    const lista=itens.filter(FIL[fPg]).sort((a,b)=>fPg==="pagas"?(a.p.pagoEm<b.p.pagoEm?1:-1):(a.p.venc<b.p.venc?-1:1));
+    const soma=f=>itens.filter(f).reduce((t,x)=>t+(Number(x.p.valor)||0),0);
+    const m=hoje.slice(0,7), recMes=soma(x=>x.p.pagoEm&&x.p.pagoEm.slice(0,7)===m);
+    const semParc=ativos.filter(c=>!pvParcs(c).length&&c.pgtoPendente);
+    const K3=(l,v,cor)=><div style={{background:C.navyM,border:"1px solid "+C.border,borderRadius:10,padding:"12px 16px",borderLeft:"3px solid "+cor}}><div style={{fontSize:19,fontWeight:800,color:cor}}>{v}</div><div style={{fontSize:12,color:C.muted}}>{l}</div></div>;
+    corpo=<div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:14}}>
+        {K3("Vencido",pvBRL(soma(FIL.vencidas)),"#e74c3c")}{K3("A vencer",pvBRL(soma(FIL.avencer)),"#f39c12")}{K3("Recebido no mês",pvBRL(recMes),"#2ecc71")}
+      </div>
+      <div style={{...row,flexWrap:"wrap",marginBottom:14}}>
+        {[["vencidas","Vencidas"],["avencer","A vencer"],["abertas","Em aberto"],["pagas","Pagas"]].map(([k,l])=><button key={k} onClick={()=>setFPg(k)} style={{padding:"7px 12px",borderRadius:20,border:"1px solid "+(fPg===k?C.blueL:C.border),background:fPg===k?"rgba(106,159,216,0.15)":C.navy,color:fPg===k?C.blueL:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{l} ({itens.filter(FIL[k]).length})</button>)}
+      </div>
+      {semParc.length>0&&<div style={{...card,fontSize:12,color:"#f39c12"}}>⚠ {semParc.length} contrato(s) ativo(s) sem parcelas (cadastrados antes): {semParc.map(c=><button key={c.id} style={{...pvSm("ghost"),margin:"4px 6px 0 0"}} onClick={()=>acoes.pagar(c)}>{c.nome}</button>)}</div>}
+      <div style={card}>{lista.length===0?<div style={{color:"#3a5880",fontSize:13}}>Nenhuma parcela neste filtro.</div>:lista.map(({c,p})=>{const at=pvParcAtraso(p);return <div key={c.id+"_"+p.n} style={{...row,flexWrap:"wrap",gap:8,padding:"10px 0",borderTop:"1px solid "+C.navyL}}>
+        <div style={{flex:1,minWidth:200}}><div style={{fontWeight:700}}>{c.nome}</div><div style={{fontSize:12,color:C.muted}}>{pvParcs(c).length>1?"Parcela "+p.n+"/"+pvParcs(c).length+" · ":""}{c.pgto||"A definir"} · vence {pvData(p.venc)}{at&&pvPix(c)&&at>PV.tolPix?" · passou da tolerância do PIX":""}</div></div>
+        <b style={{color:C.orange,minWidth:90,textAlign:"right"}}>{pvBRL(p.valor)}</b>
+        {pvParcTag(p)}
+        {p.pagoEm?<button style={pvSm("ghost")} onClick={()=>pagto.desfazer(c,p)}>Desfazer</button>:<>
+          <button style={pvWAbtn} onClick={()=>pagto.cobrar(c,p)}>📲 {at?"Cobrar":"Lembrar"}</button>
+          <button style={pvSm("primary")} onClick={()=>pagto.baixaRapida(c,p)}><Icon d={IC.check} size={13}/>Dar baixa</button></>}
+        <button style={pvSm("ghost")} onClick={()=>acoes.pagar(c)}>Parcelas</button>
+      </div>;})}</div>
     </div>;
   }
   else if(view==="agenda"){
@@ -2274,7 +2403,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
         {porId(modal.init.id).status==="ativo"&&<button style={pvSm("ghost")} onClick={()=>{const c=porId(modal.init.id);close();acoes.cancelar(c);}}>Cancelar contrato</button>}
         <button style={pvSm("danger")} onClick={()=>acoes.excluir(porId(modal.init.id))}><Icon d={IC.trash} size={13}/>Excluir</button>
       </>:null}/>}
-    {modal&&modal.t==="wa"&&mc&&<PvWAModal c={mc} ap={pvAppt(mc,schedule)} tipo={modal.tipo} phone={mc.telefone} onClose={close}
+    {modal&&modal.t==="wa"&&mc&&<PvWAModal c={mc} ap={pvAppt(mc,schedule)} parc={modal.parc?pvParcs(mc).find(p=>p.n===modal.parc):null} tipo={modal.tipo} phone={mc.telefone} onClose={close}
       onSent={t=>{const c=porId(mc.id);if(c)onSaveContrato({...c,hist:pvHist(c,"WhatsApp enviado: "+((PV_WA.find(x=>x[0]===t)||[])[1]||t))});}}/>}
     {modal&&modal.t==="waCh"&&(()=>{const ch=chamados.find(x=>x.id===modal.id);if(!ch)return null;
       return <PvWAModal c={{nome:ch.cliente,resp:ch.responsavel,torres:ch.torres,protocolo:ch.id}} tipo="chamado" phone={ch.whatsapp} title={ch.cliente} onClose={close}
@@ -2289,8 +2418,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
         setModal({t:"wa",id:mc.id,tipo:"confirmacao",c:{...mc,apptId:item.id}});
       }}/>}
     {modal&&modal.t==="pagar"&&mc&&<PvPagarModal c={mc} onClose={close}
-      onParcela={(d,prox)=>{onSaveContrato({...mc,vencPgto:prox,pgtoPendente:true,hist:pvHist(mc,"Parcela paga em "+pvData(d)+"; próximo vencimento "+pvData(prox))});close();flash("Parcela registrada.");}}
-      onQuitado={d=>{onSaveContrato({...mc,pgtoPendente:false,dataQuitacao:d,hist:pvHist(mc,"Contrato quitado em "+pvData(d))});close();flash("Quitado. Prazo da preventiva: "+pvData(pvAddMonths(d,PV.prazoMeses)));}}/>}
+      onBaixa={(p,d)=>pagto.baixa(mc,p,d)} onDesfazer={p=>pagto.desfazer(mc,p)} onGerar={()=>pagto.gerar(mc)} onCobrar={p=>pagto.cobrar(mc,p)}/>}
     {modal&&modal.t==="colar"&&<PvColarModal onClose={close} onCreate={ch=>{if(chamados.find(x=>x.id===ch.id)){alert("Este protocolo já está cadastrado.");return;}onSaveChamado(ch);close();setView("chamados");setFCh("abertos");flash("Chamado "+ch.id+" criado.");}}/>}
   </div>;
 }
