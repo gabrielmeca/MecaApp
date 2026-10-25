@@ -50,7 +50,15 @@ select option{background:#0d1525}
 .pricebox{background:#1a0e00;border:1px solid rgba(232,90,12,.3);border-radius:8px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .pricelbl{font-size:11px;color:#8899bb}
 .pricedet{font-size:11px;color:rgba(232,90,12,.7);margin-top:2px}
-.priceval{font-size:22px;font-weight:900;color:#e85a0c}
+.priceval{font-size:22px;font-weight:900;color:#e85a0c;white-space:nowrap}
+.clines{background:#0f1a2e;border:1px solid #1e293b;border-radius:8px;padding:10px 14px;margin-bottom:8px}
+.cline{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:#c7d2e6;padding:5px 0}
+.cline+.cline{border-top:1px dashed #1e293b}
+.cline b{color:#eef2ff;white-space:nowrap}
+.cline small{display:block;font-size:11px;color:#8899bb;margin-top:2px}
+.deslinfo{font-size:11px;color:#8899bb;margin:0 2px 12px;line-height:1.5}
+.deslinfo.warn{color:#f5a26a}
+.deslinfo button{background:none;border:none;color:#5aaae8;text-decoration:underline;cursor:pointer;font-size:11px;padding:0}
 .infobox{background:#150f00;border:1px solid rgba(232,90,12,.25);border-radius:7px;padding:11px 12px;font-size:12px;color:#f5a26a;display:flex;gap:8px;margin-bottom:12px;line-height:1.6}
 /* summary */
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:16px}
@@ -64,6 +72,7 @@ select option{background:#0d1525}
 button.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:13px 20px;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px;border:none;font-family:Arial,sans-serif;touch-action:manipulation;-webkit-tap-highlight-color:transparent;min-height:50px;user-select:none;-webkit-user-select:none;line-height:1}
 button.btn:active{opacity:.8;transform:scale(.98)}
 .bpri{background:#e85a0c;color:#fff}
+.btn:disabled{opacity:.5;cursor:wait}
 .bout{background:#1e293b;color:#94a3b8;border:1px solid #334155}
 .bwa{background:#25d366;color:#fff}
 /* sucesso */
@@ -144,6 +153,11 @@ button.btn:active{opacity:.8;transform:scale(.98)}
           <label>E-mail</label>
           <input type="email" id="inpEmail" placeholder="contato@exemplo.com">
         </div>
+        <div class="fg">
+          <label>CEP *</label>
+          <input type="text" id="inpCep" inputmode="numeric" placeholder="00000-000" maxlength="9">
+          <span class="err-msg" id="errCep">Informe um CEP valido</span>
+        </div>
         <div class="fg full">
           <label>Endereco Completo *</label>
           <input type="text" id="inpEnd" placeholder="Rua, numero, bairro, cidade - UF">
@@ -185,12 +199,18 @@ button.btn:active{opacity:.8;transform:scale(.98)}
           </div>
         </div>
       </div>
+      <div class="clines">
+        <div class="cline"><span>Preventiva<small id="detCusto">1 torre x R$ 550,00</small></span><b id="valTorres">R$ 550,00</b></div>
+        <div class="cline"><span>Deslocamento (ida e volta)<small id="detDesl">R$ 2,00 por km a partir da base MECA</small></span><b id="valDesl">calculando...</b></div>
+        <div class="cline"><span>Custos e pedagios<small>Valor fixo</small></span><b>R$ 100,00</b></div>
+      </div>
+      <div class="deslinfo" id="deslInfo"></div>
       <div class="pricebox">
         <div>
-          <div class="pricelbl">Investimento Semestral Total</div>
-          <div class="pricedet" id="detCusto">1 torre x R$ 550,00</div>
+          <div class="pricelbl">Investimento Total</div>
+          <div class="pricedet">Soma das linhas acima</div>
         </div>
-        <div class="priceval" id="totalCusto">R$ 550,00</div>
+        <div class="priceval" id="totalCusto">R$ 650,00</div>
       </div>
       <div class="fg" style="margin-bottom:12px">
         <label>Observacoes (opcional)</label>
@@ -288,13 +308,164 @@ var fbDB = null;
   });
 })();
 
+// Deslocamento: distancia de carro, ida e volta, da base MECA ate o endereco do cliente.
+// Usa servicos gratuitos do OpenStreetMap, sem chave: Nominatim (endereco -> coordenadas)
+// e OSRM (rota de carro). Se falharem, o chamado segue com o deslocamento "a calcular".
+var PRECO_TORRE = 550;
+var KM_VALOR = 2;
+var CUSTOS_PEDAGIOS = 100;
+var BASE_BUSCAS = [
+  'Rua Joao Manzan, 242, Jundiai, SP, Brasil',
+  'Rua Joao Manzan, Jundiai, SP, Brasil',
+  'Jardim das Tulipas, Jundiai, SP, Brasil'
+];
+var desl = {status:'', chave:'', km:null, valor:null, aprox:false, local:''};
+var deslSeq = 0;
+var baseCoord = null;
+
+function buscarJSON(url){
+  var ctl = window.AbortController ? new AbortController() : null;
+  var t = setTimeout(function(){ if(ctl) ctl.abort(); }, 12000);
+  return fetch(url, ctl ? {signal: ctl.signal} : {}).then(function(r){
+    clearTimeout(t);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  }, function(e){ clearTimeout(t); throw e; });
+}
+
+function esperar(ms){ return new Promise(function(ok){ setTimeout(ok, ms); }); }
+
+// Tenta cada busca em ordem (1 por segundo, regra do Nominatim) e devolve o primeiro resultado.
+function geocodificar(buscas, i){
+  i = i || 0;
+  if(i >= buscas.length) return Promise.resolve(null);
+  var url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=br&accept-language=pt-BR&q='+encodeURIComponent(buscas[i]);
+  return (i ? esperar(1100) : Promise.resolve()).then(function(){ return buscarJSON(url); }).then(function(r){
+    if(r && r.length) return {lat: parseFloat(r[0].lat), lon: parseFloat(r[0].lon), nome: r[0].display_name || '', idx: i};
+    return geocodificar(buscas, i+1);
+  });
+}
+
+function obterBase(){
+  if(baseCoord) return Promise.resolve(baseCoord);
+  try{
+    var c = JSON.parse(localStorage.getItem('mecaBaseCoord')||'null');
+    if(c && c.lat && c.lon){ baseCoord = c; return Promise.resolve(c); }
+  }catch(e){}
+  return geocodificar(BASE_BUSCAS).then(function(c){
+    if(!c) throw new Error('base nao encontrada');
+    baseCoord = {lat: c.lat, lon: c.lon};
+    try{ localStorage.setItem('mecaBaseCoord', JSON.stringify(baseCoord)); }catch(e){}
+    return baseCoord;
+  });
+}
+
+// CEP -> logradouro, bairro, cidade e UF pelo ViaCEP (gratuito, sem chave).
+var cepCache = {};
+function consultarCep(cep){
+  cep = (cep||'').replace(/[^0-9]/g,'');
+  if(cep.length !== 8) return Promise.resolve(null);
+  if(cepCache[cep] !== undefined) return Promise.resolve(cepCache[cep]);
+  return buscarJSON('https://viacep.com.br/ws/'+cep+'/json/').then(function(r){
+    cepCache[cep] = (r && !r.erro) ? r : null;
+    return cepCache[cep];
+  }, function(){ return null; });
+}
+
+// Preenche endereco e cidade a partir do CEP, sem apagar o que o cliente ja digitou.
+function preencherPorCep(){
+  consultarCep(getVal('inpCep')).then(function(c){
+    var err = document.getElementById('errCep');
+    if(!c){ if(getVal('inpCep').replace(/[^0-9]/g,'').length === 8 && err){ err.textContent = 'CEP nao encontrado, confira o numero'; err.style.display = 'block'; } return; }
+    if(err){ err.textContent = 'Informe um CEP valido'; err.style.display = 'none'; }
+    var end = document.getElementById('inpEnd'), cid = document.getElementById('inpCidade');
+    if(end && !end.value.trim() && c.logradouro){
+      end.value = c.logradouro+', '+(c.bairro ? ' - '+c.bairro : '')+', '+c.localidade+' - '+c.uf;
+      end.focus();
+      try{ end.setSelectionRange(c.logradouro.length+2, c.logradouro.length+2); }catch(e){}
+    }
+    if(cid && !cid.value.trim()) cid.value = c.localidade;
+  });
+}
+
+function numeroDoEndereco(end){
+  var m = end.match(/,\s*(\d+[a-zA-Z]?)\b/) || end.match(/\b(\d{1,5})\b/);
+  return m ? m[1] : '';
+}
+
+function buscasCliente(end, cid, c){
+  var l = [];
+  function add(q){ q = q.replace(/\s+/g,' ').trim(); if(q && l.indexOf(q) < 0) l.push(q); }
+  if(c && c.logradouro){
+    var num = numeroDoEndereco(end);
+    if(num) add(c.logradouro+', '+num+', '+c.localidade+', '+c.uf+', Brasil');
+    add(c.logradouro+', '+(c.bairro ? c.bairro+', ' : '')+c.localidade+', '+c.uf+', Brasil');
+    add(c.logradouro+', '+c.localidade+', '+c.uf+', Brasil');
+  }
+  var temCid = cid && end.toLowerCase().indexOf(cid.toLowerCase()) >= 0;
+  add(end+(temCid ? '' : ', '+cid)+', Brasil');
+  var partes = end.split(/[,\-]/);
+  if(partes.length > 2) add(partes[0]+', '+partes[1]+', '+cid+', Brasil');
+  if(c && c.bairro) l.push({aprox: true, q: c.bairro+', '+c.localidade+', '+c.uf+', Brasil'});
+  l.push({aprox: true, q: c ? c.localidade+', '+c.uf+', Brasil' : cid+', Brasil'});
+  return l;
+}
+
+function calcularDeslocamento(forcar){
+  var end = getVal('inpEnd'), cid = getVal('inpCidade'), cep = getVal('inpCep');
+  var chave = end+'|'+cid+'|'+cep;
+  if(!forcar && desl.chave === chave && (desl.status === 'calculando' || desl.status === 'ok')) return;
+  var seq = ++deslSeq;
+  desl = {status:'calculando', chave:chave, km:null, valor:null, aprox:false, local:''};
+  atualizarCusto();
+  var lista, base;
+  consultarCep(cep).then(function(c){
+    lista = buscasCliente(end, cid, c);
+    return obterBase();
+  }).then(function(b){
+    base = b;
+    var buscas = lista.map(function(x){ return typeof x === 'string' ? x : x.q; });
+    return esperar(1100).then(function(){ return geocodificar(buscas); });
+  }).then(function(dest){
+    if(!dest) throw new Error('endereco nao encontrado');
+    desl.aprox = typeof lista[dest.idx] !== 'string';
+    desl.local = dest.nome;
+    var pts = base.lon+','+base.lat+';'+dest.lon+','+dest.lat+';'+base.lon+','+base.lat;
+    return buscarJSON('https://router.project-osrm.org/route/v1/driving/'+pts+'?overview=false');
+  }).then(function(r){
+    if(seq !== deslSeq) return;
+    if(!r || r.code !== 'Ok' || !r.routes || !r.routes.length) throw new Error('rota nao encontrada');
+    desl.km = Math.round(r.routes[0].distance/100)/10;
+    desl.valor = Math.round(desl.km*KM_VALOR*100)/100;
+    desl.status = 'ok';
+    atualizarCusto();
+  }).catch(function(){
+    if(seq !== deslSeq) return;
+    desl.status = 'erro';
+    atualizarCusto();
+  });
+}
+
+function fKm(km){ return String(km).replace('.',',')+' km'; }
+
+function totalGeral(){
+  return torres*PRECO_TORRE + CUSTOS_PEDAGIOS + (desl.status === 'ok' ? desl.valor : 0);
+}
+
+function deslTexto(){
+  if(desl.status === 'ok') return fBRL(desl.valor)+' ('+fKm(desl.km)+' ida e volta x R$ 2,00'+(desl.aprox ? ', aproximado' : '')+')';
+  return 'A calcular pela equipe MECA';
+}
+
 function enviarFirebase(){
   if(!fbDB) return;
   var d = buildDados();
   var reg = {
     id: d.protocolo, dataSolicitacao: d.dataSolicitacao, cliente: d.cliente, responsavel: d.responsavel,
-    whatsapp: d.whatsapp.replace(/[^0-9]/g,''), email: d.email, endereco: d.endereco, cidade: d.cidade,
+    whatsapp: d.whatsapp.replace(/[^0-9]/g,''), email: d.email, endereco: d.endereco, cep: d.cep, cidade: d.cidade,
     torres: d.torres, valorSemestral: d.valorSemestral, pagamento: d.pagamento, obs: d.obs,
+    deslocamentoKm: d.deslocamentoKm, valorDeslocamento: d.valorDeslocamento, deslocamentoAproximado: d.deslocamentoAproximado,
+    custosPedagios: d.custosPedagios, valorTotal: d.valorTotal,
     status: 'novo', origem: 'formulario'
   };
   try{
@@ -319,9 +490,15 @@ function buildDados(){
     whatsapp: getVal('inpTel'),
     email: getVal('inpEmail'),
     endereco: getVal('inpEnd'),
+    cep: getVal('inpCep'),
     cidade: getVal('inpCidade'),
     torres: torres,
-    valorSemestral: torres*550,
+    valorSemestral: torres*PRECO_TORRE,
+    deslocamentoKm: desl.status === 'ok' ? desl.km : null,
+    valorDeslocamento: desl.status === 'ok' ? desl.valor : null,
+    deslocamentoAproximado: desl.status === 'ok' ? desl.aprox : null,
+    custosPedagios: CUSTOS_PEDAGIOS,
+    valorTotal: totalGeral(),
     pagamento: getVal('inpPgto')||'A definir',
     obs: getVal('inpObs'),
     status: 'Novo'
@@ -375,10 +552,35 @@ function showPasso(n){
 function atualizarCusto(){
   var el = document.getElementById('numTorres');
   if(el) el.textContent = torres;
-  var tot = document.getElementById('totalCusto');
-  if(tot) tot.textContent = fBRL(torres*550);
+  var vt = document.getElementById('valTorres');
+  if(vt) vt.textContent = fBRL(torres*PRECO_TORRE);
   var det = document.getElementById('detCusto');
   if(det) det.textContent = torres+' torre(s) x R$ 550,00';
+  var vd = document.getElementById('valDesl');
+  var dd = document.getElementById('detDesl');
+  var info = document.getElementById('deslInfo');
+  var btn2 = document.getElementById('btnProximo2');
+  if(vd) vd.textContent = desl.status === 'ok' ? fBRL(desl.valor) : (desl.status === 'erro' ? 'a calcular' : 'calculando...');
+  if(dd) dd.textContent = desl.status === 'ok' ? fKm(desl.km)+' x R$ 2,00' : 'R$ 2,00 por km a partir da base MECA';
+  if(info){
+    info.className = 'deslinfo';
+    if(desl.status === 'calculando') info.textContent = 'Calculando a rota ate o seu endereco...';
+    else if(desl.status === 'ok' && desl.aprox){
+      info.className = 'deslinfo warn';
+      info.textContent = 'Nao localizamos o endereco exato; o deslocamento foi estimado ate o centro de '+getVal('inpCidade')+'. A equipe MECA confirmara o valor.';
+    }
+    else if(desl.status === 'ok') info.textContent = 'Rota calculada ate: '+desl.local;
+    else if(desl.status === 'erro'){
+      info.className = 'deslinfo warn';
+      info.innerHTML = 'Nao foi possivel calcular o deslocamento agora. A equipe MECA confirmara o valor. <button type="button" id="btnRecalc">Tentar novamente</button>';
+      var rb = document.getElementById('btnRecalc');
+      if(rb) rb.onclick = function(){ calcularDeslocamento(true); };
+    }
+    else info.textContent = '';
+  }
+  if(btn2) btn2.disabled = desl.status === 'calculando';
+  var tot = document.getElementById('totalCusto');
+  if(tot) tot.textContent = fBRL(totalGeral())+(desl.status === 'ok' ? '' : ' + desl.');
 }
 
 function getVal(id){
@@ -407,19 +609,26 @@ function validarPasso1(){
       if(err) err.style.display='none';
     }
   }
-  return ok;
+  var cepEl = document.getElementById('inpCep');
+  var cepErr = document.getElementById('errCep');
+  var cepOk = getVal('inpCep').replace(/[^0-9]/g,'').length === 8;
+  if(cepEl) cepEl.style.borderColor = cepOk ? '' : '#ff5050';
+  if(cepErr) cepErr.style.display = cepOk ? 'none' : 'block';
+  return ok && cepOk;
 }
 
 function buildResumo(){
-  var total = torres * 550;
+  var total = totalGeral();
   var html = '';
   var items = [
     ['Cliente', getVal('inpNome'), 'color:#e85a0c'],
     ['Responsavel', getVal('inpResp'), ''],
     ['WhatsApp', getVal('inpTel'), ''],
     ['Cidade', getVal('inpCidade'), ''],
-    ['Torres', torres+' torre(s)', 'color:#5aaae8'],
-    ['Investimento', fBRL(total), 'color:#e85a0c'],
+    ['Torres', torres+' torre(s) - '+fBRL(torres*PRECO_TORRE), 'color:#5aaae8'],
+    ['Deslocamento', deslTexto(), ''],
+    ['Custos e pedagios', fBRL(CUSTOS_PEDAGIOS), ''],
+    ['Investimento total', fBRL(total)+(desl.status === 'ok' ? '' : ' + deslocamento'), 'color:#e85a0c'],
     ['Pagamento', getVal('inpPgto')||'A definir', '']
   ];
   for(var i=0;i<items.length;i++){
@@ -431,7 +640,7 @@ function buildResumo(){
 
 function buildMsg(){
   var nl = String.fromCharCode(10);
-  var total = torres * 550;
+  var total = totalGeral();
   return 'SOLICITACAO DE MANUTENCAO PREVENTIVA'+nl+
     'MECA Laundry Solutions'+nl+
     'Protocolo: '+protocolo+nl+nl+
@@ -440,9 +649,13 @@ function buildMsg(){
     'WhatsApp: '+getVal('inpTel')+nl+
     'Email: '+(getVal('inpEmail')||'-')+nl+
     'Endereco: '+getVal('inpEnd')+nl+
+    'CEP: '+getVal('inpCep')+nl+
     'Cidade: '+getVal('inpCidade')+nl+nl+
     'Torres: '+torres+' ('+torres+' lavadora(s) + '+torres+' secadora(s))'+nl+
-    'Investimento semestral: '+fBRL(total)+nl+
+    'Preventiva: '+fBRL(torres*PRECO_TORRE)+nl+
+    'Deslocamento: '+deslTexto()+nl+
+    'Custos e pedagios: '+fBRL(CUSTOS_PEDAGIOS)+nl+
+    'Investimento total: '+fBRL(total)+(desl.status === 'ok' ? '' : ' + deslocamento')+nl+
     'Pagamento: '+(getVal('inpPgto')||'A definir')+nl+nl+
     'Obs: '+(getVal('inpObs')||'Nenhuma')+nl+nl+
     'Aguardo confirmacao. Obrigado!';
@@ -451,7 +664,7 @@ function buildMsg(){
 function iniciar(){
   // passo 1
   document.getElementById('btnProximo1').onclick = function(){
-    if(validarPasso1()) showPasso(2);
+    if(validarPasso1()){ calcularDeslocamento(); showPasso(2); }
   };
 
   // passo 2
@@ -484,8 +697,8 @@ function iniciar(){
     document.getElementById('waModal').style.display='flex';
   };
   document.getElementById('btnNova').onclick = function(){
-    torres=1; atualizarCusto();
-    var ids=['inpNome','inpResp','inpTel','inpEmail','inpEnd','inpCidade','inpObs'];
+    torres=1; deslSeq++; desl={status:'', chave:'', km:null, valor:null, aprox:false, local:''}; atualizarCusto();
+    var ids=['inpNome','inpResp','inpTel','inpEmail','inpCep','inpEnd','inpCidade','inpObs'];
     for(var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]);if(el)el.value='';}
     document.getElementById('inpPgto').value='';
     document.querySelectorAll('.err-msg').forEach(function(e){e.style.display='none';});
@@ -504,6 +717,13 @@ function iniciar(){
     window.open('https://wa.me/5511972304511?text='+encodeURIComponent(waMsg),'_blank');
     document.getElementById('waModal').style.display='none';
   };
+
+  // CEP: mascara e preenchimento automatico
+  document.getElementById('inpCep').addEventListener('input', function(){
+    var v = this.value.replace(/[^0-9]/g,'').substring(0,8);
+    this.value = v.length > 5 ? v.substring(0,5)+'-'+v.substring(5) : v;
+    if(v.length === 8) preencherPorCep();
+  });
 
   // mascara telefone
   document.getElementById('inpTel').addEventListener('input', function(){
