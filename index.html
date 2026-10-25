@@ -2196,7 +2196,7 @@ function TabPreventivas({clients, tecnicos, schedule, contratos, chamados, onSav
           {ch.custosPedagios!=null&&<><span style={{color:C.muted}}>Deslocamento</span><b>{ch.valorDeslocamento!=null?pvBRL(ch.valorDeslocamento)+" · "+String(ch.deslocamentoKm).replace(".",",")+" km"+(ch.deslocamentoAproximado?" (aprox.)":""):"a calcular"}</b><span style={{color:C.muted}}>Custos/pedágios</span><b>{pvBRL(ch.custosPedagios)}</b><span style={{color:C.muted}}>Total</span><b style={{color:C.orange}}>{pvBRL(ch.valorTotal)}{ch.valorDeslocamento==null?" + desl.":""}</b></>}
           <span style={{color:C.muted}}>Pagamento</span><b>{ch.pagamento||"A definir"}</b><span style={{color:C.muted}}>Recebido</span><b>{ch.dataSolicitacao?new Date(ch.dataSolicitacao).toLocaleDateString("pt-BR"):"—"}</b>
         </div>
-        {ch.endereco&&<div style={{fontSize:12,color:C.muted}}>📍 {ch.endereco}</div>}
+        {ch.endereco&&<div style={{fontSize:12,color:C.muted}}>📍 {ch.endereco}{ch.cep?" · CEP "+ch.cep:""}</div>}
         {ch.obs&&<div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>{ch.obs}</div>}
         <div style={{...row,flexWrap:"wrap",gap:6}}>
           {s!=="convertido"&&<button style={pvSm("primary")} onClick={()=>converter(ch)}><Icon d={IC.check} size={13}/>Fechar contrato</button>}

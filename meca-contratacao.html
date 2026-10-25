@@ -153,6 +153,11 @@ button.btn:active{opacity:.8;transform:scale(.98)}
           <label>E-mail</label>
           <input type="email" id="inpEmail" placeholder="contato@exemplo.com">
         </div>
+        <div class="fg">
+          <label>CEP *</label>
+          <input type="text" id="inpCep" inputmode="numeric" placeholder="00000-000" maxlength="9">
+          <span class="err-msg" id="errCep">Informe um CEP valido</span>
+        </div>
         <div class="fg full">
           <label>Endereco Completo *</label>
           <input type="text" id="inpEnd" placeholder="Rua, numero, bairro, cidade - UF">
@@ -355,29 +360,71 @@ function obterBase(){
   });
 }
 
-function buscasCliente(end, cid){
+// CEP -> logradouro, bairro, cidade e UF pelo ViaCEP (gratuito, sem chave).
+var cepCache = {};
+function consultarCep(cep){
+  cep = (cep||'').replace(/[^0-9]/g,'');
+  if(cep.length !== 8) return Promise.resolve(null);
+  if(cepCache[cep] !== undefined) return Promise.resolve(cepCache[cep]);
+  return buscarJSON('https://viacep.com.br/ws/'+cep+'/json/').then(function(r){
+    cepCache[cep] = (r && !r.erro) ? r : null;
+    return cepCache[cep];
+  }, function(){ return null; });
+}
+
+// Preenche endereco e cidade a partir do CEP, sem apagar o que o cliente ja digitou.
+function preencherPorCep(){
+  consultarCep(getVal('inpCep')).then(function(c){
+    var err = document.getElementById('errCep');
+    if(!c){ if(getVal('inpCep').replace(/[^0-9]/g,'').length === 8 && err){ err.textContent = 'CEP nao encontrado, confira o numero'; err.style.display = 'block'; } return; }
+    if(err){ err.textContent = 'Informe um CEP valido'; err.style.display = 'none'; }
+    var end = document.getElementById('inpEnd'), cid = document.getElementById('inpCidade');
+    if(end && !end.value.trim() && c.logradouro){
+      end.value = c.logradouro+', '+(c.bairro ? ' - '+c.bairro : '')+', '+c.localidade+' - '+c.uf;
+      end.focus();
+      try{ end.setSelectionRange(c.logradouro.length+2, c.logradouro.length+2); }catch(e){}
+    }
+    if(cid && !cid.value.trim()) cid.value = c.localidade;
+  });
+}
+
+function numeroDoEndereco(end){
+  var m = end.match(/,\s*(\d+[a-zA-Z]?)\b/) || end.match(/\b(\d{1,5})\b/);
+  return m ? m[1] : '';
+}
+
+function buscasCliente(end, cid, c){
   var l = [];
   function add(q){ q = q.replace(/\s+/g,' ').trim(); if(q && l.indexOf(q) < 0) l.push(q); }
+  if(c && c.logradouro){
+    var num = numeroDoEndereco(end);
+    if(num) add(c.logradouro+', '+num+', '+c.localidade+', '+c.uf+', Brasil');
+    add(c.logradouro+', '+(c.bairro ? c.bairro+', ' : '')+c.localidade+', '+c.uf+', Brasil');
+    add(c.logradouro+', '+c.localidade+', '+c.uf+', Brasil');
+  }
   var temCid = cid && end.toLowerCase().indexOf(cid.toLowerCase()) >= 0;
   add(end+(temCid ? '' : ', '+cid)+', Brasil');
   var partes = end.split(/[,\-]/);
   if(partes.length > 2) add(partes[0]+', '+partes[1]+', '+cid+', Brasil');
-  l.push({aprox: true, q: cid+', Brasil'});
+  if(c && c.bairro) l.push({aprox: true, q: c.bairro+', '+c.localidade+', '+c.uf+', Brasil'});
+  l.push({aprox: true, q: c ? c.localidade+', '+c.uf+', Brasil' : cid+', Brasil'});
   return l;
 }
 
 function calcularDeslocamento(forcar){
-  var end = getVal('inpEnd'), cid = getVal('inpCidade');
-  var chave = end+'|'+cid;
+  var end = getVal('inpEnd'), cid = getVal('inpCidade'), cep = getVal('inpCep');
+  var chave = end+'|'+cid+'|'+cep;
   if(!forcar && desl.chave === chave && (desl.status === 'calculando' || desl.status === 'ok')) return;
   var seq = ++deslSeq;
   desl = {status:'calculando', chave:chave, km:null, valor:null, aprox:false, local:''};
   atualizarCusto();
-  var lista = buscasCliente(end, cid);
-  var buscas = lista.map(function(b){ return typeof b === 'string' ? b : b.q; });
-  var base;
-  obterBase().then(function(b){
+  var lista, base;
+  consultarCep(cep).then(function(c){
+    lista = buscasCliente(end, cid, c);
+    return obterBase();
+  }).then(function(b){
     base = b;
+    var buscas = lista.map(function(x){ return typeof x === 'string' ? x : x.q; });
     return esperar(1100).then(function(){ return geocodificar(buscas); });
   }).then(function(dest){
     if(!dest) throw new Error('endereco nao encontrado');
@@ -415,7 +462,7 @@ function enviarFirebase(){
   var d = buildDados();
   var reg = {
     id: d.protocolo, dataSolicitacao: d.dataSolicitacao, cliente: d.cliente, responsavel: d.responsavel,
-    whatsapp: d.whatsapp.replace(/[^0-9]/g,''), email: d.email, endereco: d.endereco, cidade: d.cidade,
+    whatsapp: d.whatsapp.replace(/[^0-9]/g,''), email: d.email, endereco: d.endereco, cep: d.cep, cidade: d.cidade,
     torres: d.torres, valorSemestral: d.valorSemestral, pagamento: d.pagamento, obs: d.obs,
     deslocamentoKm: d.deslocamentoKm, valorDeslocamento: d.valorDeslocamento, deslocamentoAproximado: d.deslocamentoAproximado,
     custosPedagios: d.custosPedagios, valorTotal: d.valorTotal,
@@ -443,6 +490,7 @@ function buildDados(){
     whatsapp: getVal('inpTel'),
     email: getVal('inpEmail'),
     endereco: getVal('inpEnd'),
+    cep: getVal('inpCep'),
     cidade: getVal('inpCidade'),
     torres: torres,
     valorSemestral: torres*PRECO_TORRE,
@@ -561,7 +609,12 @@ function validarPasso1(){
       if(err) err.style.display='none';
     }
   }
-  return ok;
+  var cepEl = document.getElementById('inpCep');
+  var cepErr = document.getElementById('errCep');
+  var cepOk = getVal('inpCep').replace(/[^0-9]/g,'').length === 8;
+  if(cepEl) cepEl.style.borderColor = cepOk ? '' : '#ff5050';
+  if(cepErr) cepErr.style.display = cepOk ? 'none' : 'block';
+  return ok && cepOk;
 }
 
 function buildResumo(){
@@ -596,6 +649,7 @@ function buildMsg(){
     'WhatsApp: '+getVal('inpTel')+nl+
     'Email: '+(getVal('inpEmail')||'-')+nl+
     'Endereco: '+getVal('inpEnd')+nl+
+    'CEP: '+getVal('inpCep')+nl+
     'Cidade: '+getVal('inpCidade')+nl+nl+
     'Torres: '+torres+' ('+torres+' lavadora(s) + '+torres+' secadora(s))'+nl+
     'Preventiva: '+fBRL(torres*PRECO_TORRE)+nl+
@@ -644,7 +698,7 @@ function iniciar(){
   };
   document.getElementById('btnNova').onclick = function(){
     torres=1; deslSeq++; desl={status:'', chave:'', km:null, valor:null, aprox:false, local:''}; atualizarCusto();
-    var ids=['inpNome','inpResp','inpTel','inpEmail','inpEnd','inpCidade','inpObs'];
+    var ids=['inpNome','inpResp','inpTel','inpEmail','inpCep','inpEnd','inpCidade','inpObs'];
     for(var i=0;i<ids.length;i++){var el=document.getElementById(ids[i]);if(el)el.value='';}
     document.getElementById('inpPgto').value='';
     document.querySelectorAll('.err-msg').forEach(function(e){e.style.display='none';});
@@ -663,6 +717,13 @@ function iniciar(){
     window.open('https://wa.me/5511972304511?text='+encodeURIComponent(waMsg),'_blank');
     document.getElementById('waModal').style.display='none';
   };
+
+  // CEP: mascara e preenchimento automatico
+  document.getElementById('inpCep').addEventListener('input', function(){
+    var v = this.value.replace(/[^0-9]/g,'').substring(0,8);
+    this.value = v.length > 5 ? v.substring(0,5)+'-'+v.substring(5) : v;
+    if(v.length === 8) preencherPorCep();
+  });
 
   // mascara telefone
   document.getElementById('inpTel').addEventListener('input', function(){
